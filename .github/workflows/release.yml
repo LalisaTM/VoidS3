@@ -78,7 +78,7 @@ jobs:
           $env:VOIDS3_UPDATE_PACKAGE = (Get-ChildItem release-assets/*-setup.exe -File).FullName
           cargo test --release -p voids3-desktop --locked published_package_matches_embedded_key -- --ignored
           if ($LASTEXITCODE -ne 0) { throw "Updater signature verification failed; release will not be published" }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-release
           path: release-assets/*
