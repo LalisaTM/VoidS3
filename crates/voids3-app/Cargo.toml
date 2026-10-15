@@ -1,0 +1,18 @@
+[package]
+name = "voids3-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voids3-core.workspace = true
+voids3-platform.workspace = true
+voids3-storage.workspace = true
+voids3-s3.workspace = true
+voids3-transfer.workspace = true
+voids3-sync.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+

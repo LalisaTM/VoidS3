@@ -1,0 +1,24 @@
+[package]
+name = "voids3-transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voids3-core.workspace = true
+voids3-platform.workspace = true
+voids3-storage.workspace = true
+voids3-s3.workspace = true
+aws-sdk-s3.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+uuid.workspace = true
+futures.workspace = true
+tracing.workspace = true
+mime_guess = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+

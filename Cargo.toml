@@ -1,0 +1,41 @@
+[workspace]
+members = ["crates/*", "apps/cli", "apps/desktop/src-tauri"]
+default-members = ["crates/voids3-core", "crates/voids3-platform", "crates/voids3-storage", "crates/voids3-s3", "crates/voids3-transfer", "crates/voids3-sync", "apps/cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/LalisaTM/VoidS3"
+rust-version = "1.94"
+
+[workspace.dependencies]
+voids3-core = { path = "crates/voids3-core" }
+voids3-platform = { path = "crates/voids3-platform" }
+voids3-storage = { path = "crates/voids3-storage" }
+voids3-s3 = { path = "crates/voids3-s3" }
+voids3-transfer = { path = "crates/voids3-transfer" }
+voids3-sync = { path = "crates/voids3-sync" }
+anyhow = "1"
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "default-https-client", "behavior-version-latest"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+url = "2"
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+codegen-units = 16
+strip = true
+

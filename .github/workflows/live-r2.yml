@@ -1,0 +1,26 @@
+name: Optional live R2
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  live-r2:
+    runs-on: ubuntu-latest
+    environment: r2-test
+    env:
+      VOIDS3_TEST_ENDPOINT: ${{ secrets.R2_TEST_ENDPOINT }}
+      VOIDS3_TEST_REGION: auto
+      VOIDS3_TEST_BUCKET: ${{ secrets.R2_TEST_BUCKET }}
+      VOIDS3_TEST_ACCESS_KEY: ${{ secrets.R2_TEST_ACCESS_KEY }}
+      VOIDS3_TEST_SECRET_KEY: ${{ secrets.R2_TEST_SECRET_KEY }}
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Validate test configuration
+        run: test -n "$VOIDS3_TEST_ENDPOINT" && test -n "$VOIDS3_TEST_BUCKET" && test -n "$VOIDS3_TEST_ACCESS_KEY" && test -n "$VOIDS3_TEST_SECRET_KEY"
+      - run: cargo test -p voids3-transfer --test s3 --locked -- --ignored

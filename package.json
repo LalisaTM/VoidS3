@@ -1,0 +1,24 @@
+{
+  "name": "voids3-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @voids3/desktop",
+    "build": "npm run build -w @voids3/desktop",
+    "desktop": "npm run tauri -w @voids3/desktop --",
+    "test": "npm run test -w @voids3/desktop",
+    "lint": "npm run lint -w @voids3/desktop",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "version:check": "node scripts/version.mjs --check"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

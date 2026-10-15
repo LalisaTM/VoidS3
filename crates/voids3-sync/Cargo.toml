@@ -1,0 +1,10 @@
+[package]
+name = "voids3-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voids3-core.workspace = true
+serde.workspace = true
+
