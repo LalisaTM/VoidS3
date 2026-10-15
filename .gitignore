@@ -1,0 +1,17 @@
+/target/
+**/node_modules/
+**/dist/
+**/coverage/
+**/gen/schemas/
+*.log
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.voids3-part
+/artifacts/
+.DS_Store
+Thumbs.db
+
