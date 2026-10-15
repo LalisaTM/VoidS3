@@ -5,7 +5,17 @@ import { usePreferences } from "../store";
 import { version } from "../../package.json";
 import { Modal } from "./Modal";
 import { Button } from "./ui/button";
-export function SettingsDialog({ onClose }: { onClose: () => void }) {
+import { UpdatePanel } from "./UpdatePanel";
+import type { Updater } from "../lib/useUpdater";
+export function SettingsDialog({
+  onClose,
+  updater,
+  activeTransfers,
+}: {
+  onClose: () => void;
+  updater: Updater;
+  activeTransfers: number;
+}) {
   const { data, error } = useQuery({
     queryKey: ["settings"],
     queryFn: () => api<TransferSettings>("settings"),
@@ -18,7 +28,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
   async function save(e: FormEvent) {
     e.preventDefault();
-    if (!settings) return;
+    if (!settings || updater.busy) return;
     setBusy(true);
     try {
       await api("save_settings", { settings });
@@ -35,8 +45,20 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       title="Settings"
       description="Conservative defaults. Tune only after measuring real transfers."
       onClose={onClose}
+      closeDisabled={updater.busy}
     >
       <form onSubmit={(e) => void save(e)} className="form">
+        <UpdatePanel updater={updater} activeTransfers={activeTransfers} />
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={preferences.checkUpdatesAutomatically}
+            onChange={(e) =>
+              preferences.set({ checkUpdatesAutomatically: e.target.checked })
+            }
+          />{" "}
+          Check for updates at startup and once a day
+        </label>
         <div className="section-label">APPEARANCE</div>
         <div className="form-grid">
           <label>
@@ -126,7 +148,11 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         )}
         <div className="modal-footer">
           <span className="muted mono">VoidS3 {version} · MIT</span>
-          <Button type="submit" variant="default" disabled={!settings || busy}>
+          <Button
+            type="submit"
+            variant="default"
+            disabled={!settings || busy || updater.busy}
+          >
             Save settings
           </Button>
         </div>

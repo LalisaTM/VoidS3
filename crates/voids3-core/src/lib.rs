@@ -127,6 +127,8 @@ pub struct Entry {
     pub size: u64,
     pub modified: Option<i64>,
     pub etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_class: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

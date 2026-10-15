@@ -1,8 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod updater;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
-use voids3_app::App;
+use voids3_app::{App, BatchControl, DeleteEntry};
 use voids3_core::{Credentials, Error, Profile, Result, TransferSettings};
 
 #[derive(Deserialize)]
@@ -34,6 +35,10 @@ enum Request {
     },
     LocalDelete {
         path: PathBuf,
+    },
+    DeleteEntries {
+        id: Option<String>,
+        entries: Vec<DeleteEntry>,
     },
     RemoteList {
         id: String,
@@ -82,6 +87,9 @@ enum Request {
     TransferControl {
         id: String,
         operation: Control,
+    },
+    TransferControlAll {
+        operation: BatchControl,
     },
     ClearFinished,
     Settings,
@@ -148,6 +156,9 @@ async fn execute(app: Arc<App>, request: Request) -> Result<Value> {
             blocking(move || voids3_platform::recycle(&path)).await?;
             Ok(Value::Null)
         }
+        Request::DeleteEntries { id, entries } => {
+            Ok(json!(app.delete_entries(id.as_deref(), entries).await?))
+        }
         Request::RemoteList { id, prefix, token } => Ok(json!(
             app.client(&id).await?.list(&prefix, token, false).await?
         )),
@@ -184,6 +195,9 @@ async fn execute(app: Arc<App>, request: Request) -> Result<Value> {
         } => Ok(json!(app.download(&id, keys, directory).await?)),
         Request::Transfers => Ok(json!(app.engine.list()?)),
         Request::TransferControl { id, operation } => {
+            if matches!(operation, Control::Cancel) && app.engine.request_cancel(&id)? {
+                return Ok(Value::Null);
+            }
             match operation {
                 Control::Pause => app.engine.pause(&id)?,
                 Control::Resume | Control::Cancel => {
@@ -203,6 +217,7 @@ async fn execute(app: Arc<App>, request: Request) -> Result<Value> {
             };
             Ok(Value::Null)
         }
+        Request::TransferControlAll { operation } => Ok(json!(app.control_all(operation).await?)),
         Request::ClearFinished => {
             app.engine.clear_finished()?;
             Ok(Value::Null)
@@ -244,8 +259,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let app = Arc::new(App::open()?);
     tauri::Builder::default()
         .manage(app)
+        .manage(updater::Updates::default())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![dispatch])
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            dispatch,
+            updater::check_for_updates,
+            updater::install_update
+        ])
         .run(tauri::generate_context!())?;
     Ok(())
 }

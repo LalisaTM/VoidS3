@@ -14,6 +14,10 @@
 *.db-wal
 *.voids3-part
 /artifacts/
+/build-assets/
+/release-assets/
+*.key
+*.password
 .DS_Store
 Thumbs.db
 

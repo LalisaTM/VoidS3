@@ -29,6 +29,10 @@ export function Files({
   writable = true,
   onAction,
   onRetry,
+  filter,
+  showFilter = true,
+  canTransfer = true,
+  dropPath,
 }: {
   entries: FileEntry[];
   selected: string[];
@@ -41,8 +45,13 @@ export function Files({
   writable?: boolean;
   onAction: (action: string, entry?: FileEntry) => void;
   onRetry: () => void;
+  filter?: string;
+  showFilter?: boolean;
+  canTransfer?: boolean;
+  dropPath?: string;
 }) {
-  const [search, setSearch] = useState("");
+  const [localSearch, setSearch] = useState("");
+  const search = filter ?? localSearch;
   const [sort, setSort] = useState<"name" | "size" | "modified">("name");
   const [descending, setDescending] = useState(false);
   const [menu, setMenu] = useState<string | null>(null);
@@ -102,26 +111,28 @@ export function Files({
   }
   const SortIcon = descending ? ArrowDown : ArrowUp;
   return (
-    <div className="file-area">
-      <div className="filter-bar">
-        <Search size={14} />
-        <input
-          aria-label={remote ? "Filter remote files" : "Filter local files"}
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Filter loaded files…"
-        />
-        <span className="mono">{filtered.length}</span>
-        <Button
-          aria-label={remote ? "New remote folder" : "New local folder"}
-          size="icon"
-          variant="ghost"
-          disabled={!connected || !writable}
-          onClick={() => onAction("mkdir")}
-        >
-          <FolderPlus size={15} />
-        </Button>
-      </div>
+    <div className={`file-area ${remote ? "remote-files" : "local-files"}`}>
+      {showFilter && (
+        <div className="filter-bar">
+          <Search size={14} />
+          <input
+            aria-label={remote ? "Filter remote files" : "Filter local files"}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Filter loaded files…"
+          />
+          <span className="mono">{filtered.length}</span>
+          <Button
+            aria-label={remote ? "New remote folder" : "New local folder"}
+            size="icon"
+            variant="ghost"
+            disabled={!connected || !writable}
+            onClick={() => onAction("mkdir")}
+          >
+            <FolderPlus size={15} />
+          </Button>
+        </div>
+      )}
       <div className="file-columns">
         <button onClick={() => sortBy("name")}>
           Name {sort === "name" && <SortIcon size={11} />}
@@ -132,6 +143,7 @@ export function Files({
         <button onClick={() => sortBy("modified")}>
           Modified {sort === "modified" && <SortIcon size={11} />}
         </button>
+        {remote && <span className="storage-class">Storage class</span>}
         <span />
       </div>
       <div
@@ -183,6 +195,10 @@ export function Files({
             onSelect(filtered.map((f) => f.path));
           }
           if (e.key === "Escape") onSelect([]);
+          if (e.key === "Delete" && selected.length && writable) {
+            e.preventDefault();
+            onAction("delete-selected");
+          }
           if (e.key === "Enter" && selected.length === 1) {
             const entry = filtered.find((f) => f.path === selected[0]);
             if (entry) onOpen(entry);
@@ -209,8 +225,8 @@ export function Files({
             <h3>
               {!connected
                 ? remote
-                  ? "Your storage, connected."
-                  : "Your local workspace"
+                  ? "Connect a bucket"
+                  : "Browse local files"
                 : search
                   ? "No matching files"
                   : "This folder is empty"}
@@ -225,7 +241,7 @@ export function Files({
                   : "Create a folder or transfer files to get started."}
             </p>
             {remote && !connected && (
-              <Button onClick={() => onAction("connect")}>
+              <Button variant="default" onClick={() => onAction("connect")}>
                 <span>+</span> Add connection
               </Button>
             )}
@@ -245,6 +261,11 @@ export function Files({
                   key={entry.path}
                   role="option"
                   aria-selected={selected.includes(entry.path)}
+                  data-entry-path={entry.path}
+                  data-entry-folder={entry.is_dir ? entry.path : undefined}
+                  data-drop-hover={
+                    (entry.is_dir && entry.path === dropPath) || undefined
+                  }
                   className={`file-row ${selected.includes(entry.path) ? "selected" : ""}`}
                   style={{
                     position: "absolute",
@@ -254,24 +275,17 @@ export function Files({
                     height: row.size,
                     transform: `translateY(${row.start}px)`,
                   }}
-                  onClick={(e) => select(e, row.index)}
+                  onClick={(e) => {
+                    container.current?.focus({ preventScroll: true });
+                    select(e, row.index);
+                  }}
                   onDoubleClick={() => onOpen(entry)}
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    onSelect([entry.path]);
+                    if (!selected.includes(entry.path)) onSelect([entry.path]);
                     setMenu(entry.path);
                   }}
-                  draggable
-                  onDragStart={(e) => {
-                    e.dataTransfer.setData(
-                      remote
-                        ? "application/x-voids3-remote"
-                        : "application/x-voids3-local",
-                      JSON.stringify(
-                        selected.includes(entry.path) ? selected : [entry.path],
-                      ),
-                    );
-                  }}
+                  draggable={false}
                 >
                   <span className="filename">
                     {entry.is_dir ? (
@@ -283,22 +297,39 @@ export function Files({
                     ) : (
                       <File size={16} />
                     )}
-                    <span>{entry.name}</span>
+                    <span title={entry.name}>{entry.name}</span>
                     {entry.is_dir && (
                       <ChevronRight size={12} className="folder-chevron" />
                     )}
                   </span>
                   <span className="mono muted">
-                    {entry.is_dir ? "—" : bytes(entry.size)}
+                    {entry.is_dir ? "-" : bytes(entry.size)}
                   </span>
                   <span className="muted date">
                     {entry.modified
-                      ? new Date(entry.modified * 1000).toLocaleDateString(
+                      ? new Date(entry.modified * 1000).toLocaleString(
                           undefined,
-                          { month: "short", day: "numeric", year: "2-digit" },
+                          {
+                            month: "short",
+                            day: "numeric",
+                            year: "2-digit",
+                            hour: "numeric",
+                            minute: "2-digit",
+                          },
                         )
-                      : "—"}
+                      : "-"}
                   </span>
+                  {remote && (
+                    <span
+                      className="storage-class muted"
+                      title={
+                        entry.storage_class ??
+                        "Storage class not reported by the provider"
+                      }
+                    >
+                      {entry.is_dir ? "" : (entry.storage_class ?? "-")}
+                    </span>
+                  )}
                   <Dropdown.Root
                     open={menu === entry.path}
                     onOpenChange={(open) => setMenu(open ? entry.path : null)}
@@ -315,18 +346,20 @@ export function Files({
                     </Dropdown.Trigger>
                     <Dropdown.Portal>
                       <Dropdown.Content className="dropdown" align="end">
+                        <Dropdown.Item
+                          disabled={!canTransfer}
+                          onSelect={() => onAction("transfer", entry)}
+                        >
+                          {remote ? (
+                            <DownloadCloud size={14} />
+                          ) : (
+                            <UploadCloud size={14} />
+                          )}{" "}
+                          {remote ? "Download" : "Upload"}
+                          {entry.is_dir ? " folder…" : ""}
+                        </Dropdown.Item>
                         {!entry.is_dir && (
                           <>
-                            <Dropdown.Item
-                              onSelect={() => onAction("transfer", entry)}
-                            >
-                              {remote ? (
-                                <DownloadCloud size={14} />
-                              ) : (
-                                <UploadCloud size={14} />
-                              )}{" "}
-                              {remote ? "Download" : "Upload"}
-                            </Dropdown.Item>
                             <Dropdown.Item
                               onSelect={() => onAction("properties", entry)}
                             >
@@ -366,9 +399,22 @@ export function Files({
                           <Dropdown.Item
                             className="destructive"
                             disabled={!writable}
-                            onSelect={() => onAction("delete", entry)}
+                            onSelect={() =>
+                              onAction(
+                                selected.includes(entry.path) &&
+                                  selected.length > 1
+                                  ? "delete-selected"
+                                  : "delete",
+                                entry,
+                              )
+                            }
                           >
-                            {remote ? "Delete object…" : "Move to recycle bin…"}
+                            {selected.includes(entry.path) &&
+                            selected.length > 1
+                              ? "Delete selected items…"
+                              : remote
+                                ? "Delete object…"
+                                : "Move to recycle bin…"}
                           </Dropdown.Item>
                         )}
                       </Dropdown.Content>

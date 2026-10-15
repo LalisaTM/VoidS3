@@ -1,6 +1,6 @@
 {
   "name": "voids3-workspace",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "workspaces": [
     "apps/desktop"
@@ -13,7 +13,8 @@
     "lint": "npm run lint -w @voids3/desktop",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "version:check": "node scripts/version.mjs --check"
+    "version:check": "node scripts/version.mjs --check",
+    "test:release": "node --test scripts/updater-manifest.test.mjs"
   },
   "devDependencies": {
     "prettier": "^3.6.2"

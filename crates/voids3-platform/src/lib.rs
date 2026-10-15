@@ -40,6 +40,7 @@ pub fn list_dir(path: &Path, hidden: bool) -> Result<Vec<Entry>> {
                 .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
                 .map(|m| m.as_secs() as i64),
             etag: None,
+            storage_class: None,
         });
     }
     entries.sort_by(|a, b| {
@@ -104,6 +105,7 @@ pub fn recursive_files(root: &Path) -> Result<Vec<Entry>> {
                 .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
                 .map(|m| m.as_secs() as i64),
             etag: None,
+            storage_class: None,
         });
         if entries.len() > 100_000 {
             return Err(Error::Invalid(
