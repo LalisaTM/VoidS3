@@ -1,0 +1,13 @@
+[package]
+name = "voids3-s3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voids3-core.workspace = true
+aws-sdk-s3.workspace = true
+tokio.workspace = true
+serde.workspace = true
+percent-encoding = "2"
+

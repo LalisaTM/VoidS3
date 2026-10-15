@@ -1,5 +1,7 @@
 # VoidS3
 
+[![CI](https://github.com/LalisaTM/VoidS3/actions/workflows/ci.yml/badge.svg)](https://github.com/LalisaTM/VoidS3/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/LalisaTM/VoidS3?include_prereleases)](https://github.com/LalisaTM/VoidS3/releases) [![License: MIT](https://img.shields.io/badge/License-MIT-c7f9a6)](LICENSE)
+
 A native S3 desktop client built with Rust, Tauri 2, and React 19. Cloudflare R2 first, with configurable S3-compatible endpoints. Windows is the primary target.
 
 ## Completely vibecoded, for fun
@@ -55,11 +57,11 @@ Build the CLI with `cargo build --release -p voids3-cli`. Do not run the desktop
 
 Create an R2 API credential with object permissions for the intended bucket. In **New connection**, choose R2, enter the bucket explicitly, use signing region `auto`, and enter one of:
 
-| Jurisdiction | Endpoint |
-| --- | --- |
-| Default | `https://<account-id>.r2.cloudflarestorage.com` |
-| EU | `https://<account-id>.eu.r2.cloudflarestorage.com` |
-| FedRAMP | `https://<account-id>.fedramp.r2.cloudflarestorage.com` |
+| Jurisdiction | Endpoint                                                |
+| ------------ | ------------------------------------------------------- |
+| Default      | `https://<account-id>.r2.cloudflarestorage.com`         |
+| EU           | `https://<account-id>.eu.r2.cloudflarestorage.com`      |
+| FedRAMP      | `https://<account-id>.fedramp.r2.cloudflarestorage.com` |
 
 Use the endpoint for the bucket's jurisdiction, as described in [Cloudflare's data location documentation](https://developers.cloudflare.com/r2/reference/data-location/). Test uses `ListObjectsV2` for the configured bucket/prefix, not account-wide `ListBuckets`. Multipart recovery additionally needs permission to list parts and abort multipart uploads. Live R2 behavior requires optional credentialed tests; local S3 tests alone do not establish R2 compatibility.
 

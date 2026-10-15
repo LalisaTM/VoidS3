@@ -1,0 +1,60 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  windows:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Require a main-branch commit
+        shell: pwsh
+        run: |
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) { throw "Release tags must point to a commit already merged into main" }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: windows-release
+      - run: npm ci
+      - run: npm run version:check
+      - run: npm run lint
+      - run: npm test
+      - run: npm run desktop build -- --bundles nsis
+      - run: cargo build --release --locked -p voids3-cli
+      - name: Package CLI and checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          Copy-Item target/release/bundle/nsis/*-setup.exe release-assets/
+          Compress-Archive -Path target/release/voids3.exe,README.md,LICENSE -DestinationPath release-assets/voids3-cli-windows-x64.zip
+          Get-ChildItem release-assets -File | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content release-assets/SHA256SUMS.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-release
+          path: release-assets/*
+      - name: Publish experimental release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create $env:GITHUB_REF_NAME release-assets/* --verify-tag --prerelease --title "VoidS3 $env:GITHUB_REF_NAME — vibecoded experiment" --notes-file docs/release-notes.md

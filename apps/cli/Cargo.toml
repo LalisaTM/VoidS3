@@ -1,0 +1,21 @@
+[package]
+name = "voids3-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "voids3"
+path = "src/main.rs"
+
+[dependencies]
+voids3-app = { path = "../../crates/voids3-app" }
+voids3-core.workspace = true
+voids3-transfer.workspace = true
+voids3-sync.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+

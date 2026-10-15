@@ -1,0 +1,24 @@
+[package]
+name = "voids3-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+voids3-app = { path = "../../../crates/voids3-app" }
+voids3-core.workspace = true
+voids3-platform.workspace = true
+voids3-transfer.workspace = true
+voids3-sync.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
