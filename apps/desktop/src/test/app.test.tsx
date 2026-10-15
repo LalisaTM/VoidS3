@@ -80,6 +80,31 @@ describe("connection form", () => {
       "test-secret",
     );
   });
+  it("can finish saving a newly tested connection without re-entering credentials", async () => {
+    mockApi.mockResolvedValue(null);
+    const onSaved = vi.fn();
+    wrap(<ConnectionDialog onClose={vi.fn()} onSaved={onSaved} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Connection name"), "Saved test");
+    await user.type(
+      screen.getByLabelText("Endpoint URL"),
+      "https://example.com",
+    );
+    await user.type(screen.getByLabelText("Bucket"), "assets");
+    await user.type(screen.getByLabelText("Access key ID"), "test-access");
+    await user.type(screen.getByLabelText("Secret access key"), "test-secret");
+    await user.click(screen.getByRole("button", { name: "Save & test" }));
+    expect(
+      await screen.findByText("Bucket access verified."),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Secret access key")).toHaveValue("");
+    await user.click(screen.getByRole("button", { name: "Save connection" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(mockApi).toHaveBeenLastCalledWith(
+      "save_profile",
+      expect.objectContaining({ credentials: null }),
+    );
+  });
   it("surfaces actionable backend errors", async () => {
     mockApi.mockRejectedValue("Credential store: locked");
     wrap(

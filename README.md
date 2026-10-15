@@ -8,7 +8,7 @@ A native S3 desktop client built with Rust, Tauri 2, and React 19. Cloudflare R2
 
 **This project is completely vibecoded for fun. No human has read, reviewed, modified, edited, or otherwise manually intervened in any of this code.** AI agents handle the implementation, commits, pushing, branching, CI configuration, tests, versioning, and release setup. Humans supplied the idea and specification and started the experiment.
 
-Automated checks are not human review or a security audit. This is an experimental **0.1.0** release, not a claim of production readiness. Use disposable credentials and test buckets first. The original specification is in [docs/brief.md](docs/brief.md); it describes the intended product, including features that are still unfinished.
+Automated checks are not human review or a security audit. This is an experimental **0.1.1** release, not a claim of production readiness. Use disposable credentials and test buckets first. The original specification is in [docs/brief.md](docs/brief.md); it describes the intended product, including features that are still unfinished.
 
 ## What is implemented
 

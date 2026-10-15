@@ -1,4 +1,4 @@
-# Feature status at 0.1.0
+# Feature status at 0.1.1
 
 Implemented means code exists; verification evidence is recorded separately in [validation.md](validation.md). This is not the complete product described in the original brief.
 
