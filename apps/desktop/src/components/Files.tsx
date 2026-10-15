@@ -209,8 +209,8 @@ export function Files({
             <h3>
               {!connected
                 ? remote
-                  ? "Your storage, connected."
-                  : "Your local workspace"
+                  ? "Connect a bucket"
+                  : "Browse local files"
                 : search
                   ? "No matching files"
                   : "This folder is empty"}
@@ -225,7 +225,7 @@ export function Files({
                   : "Create a folder or transfer files to get started."}
             </p>
             {remote && !connected && (
-              <Button onClick={() => onAction("connect")}>
+              <Button variant="default" onClick={() => onAction("connect")}>
                 <span>+</span> Add connection
               </Button>
             )}
@@ -289,7 +289,7 @@ export function Files({
                     )}
                   </span>
                   <span className="mono muted">
-                    {entry.is_dir ? "—" : bytes(entry.size)}
+                    {entry.is_dir ? "-" : bytes(entry.size)}
                   </span>
                   <span className="muted date">
                     {entry.modified
@@ -297,7 +297,7 @@ export function Files({
                           undefined,
                           { month: "short", day: "numeric", year: "2-digit" },
                         )
-                      : "—"}
+                      : "-"}
                   </span>
                   <Dropdown.Root
                     open={menu === entry.path}

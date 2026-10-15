@@ -65,7 +65,7 @@ export function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 export function bytes(n: number): string {
-  if (!Number.isFinite(n) || n < 0) return "—";
+  if (!Number.isFinite(n) || n < 0) return "-";
   if (n < 1024) return `${n} B`;
   const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), 4);
   return `${(n / 1024 ** i).toFixed(n / 1024 ** i < 10 ? 1 : 0)} ${["B", "KiB", "MiB", "GiB", "TiB"][i]}`;

@@ -22,12 +22,12 @@ import {
   HardDrive,
   LayoutPanelLeft,
   LockKeyhole,
+  Menu,
   MoreHorizontal,
   Plus,
   RefreshCw,
   Settings2,
   ShieldCheck,
-  SlidersHorizontal,
   Terminal,
   Unplug,
   Workflow,
@@ -91,6 +91,13 @@ export default function App() {
   const [connectionId, setConnectionId] = useState("");
   const [connectionForm, setConnectionForm] = useState<Profile | "new">();
   const [settings, setSettings] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  useEffect(() => {
+    if (navigationOpen)
+      document
+        .querySelector<HTMLElement>("#workspace-navigation button")
+        ?.focus();
+  }, [navigationOpen]);
   const [sync, setSync] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -375,8 +382,20 @@ export default function App() {
   }
   const readonly = !!profile?.read_only;
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div
+      className="app-shell"
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && navigationOpen) {
+          setNavigationOpen(false);
+          document.getElementById("navigation-toggle")?.focus();
+        }
+      }}
+    >
+      <aside
+        id="workspace-navigation"
+        aria-label="Workspace navigation"
+        className={`sidebar ${navigationOpen ? "open" : ""}`}
+      >
         <div className="brand">
           <svg viewBox="0 0 32 32" width="29" height="29" aria-hidden="true">
             <path d="M3 5 16 28 29 5h-8l-5 10-5-10Z" fill="currentColor" />
@@ -386,9 +405,7 @@ export default function App() {
           </span>
           <span className="version">{version}</span>
         </div>
-        <div className="workspace-label">
-          YOUR WORKSPACE <LockKeyhole size={11} />
-        </div>
+        <div className="workspace-label">Workspace</div>
         <button
           className="sidebar-link selected"
           onClick={() => preferences.set({ view: "dual" })}
@@ -403,7 +420,7 @@ export default function App() {
           {active > 0 && <span className="count">{active}</span>}
         </button>
         <div className="sidebar-section">
-          <span>CONNECTIONS</span>
+          <span>Connections</span>
           <button
             aria-label="Add connection"
             onClick={() => setConnectionForm("new")}
@@ -503,9 +520,6 @@ export default function App() {
           <div className="sidebar-empty">
             <CloudOff size={20} />
             <p>No connections yet</p>
-            <button onClick={() => setConnectionForm("new")}>
-              Connect your first bucket <ArrowRight size={12} />
-            </button>
           </div>
         )}
         <button
@@ -515,7 +529,7 @@ export default function App() {
           <Plus size={14} /> New connection
         </button>
         <div className="sidebar-section">
-          <span>BOOKMARKS</span>
+          <span>Bookmarks</span>
           <button
             aria-label="Bookmark current pair"
             disabled={!profile || !local.path}
@@ -573,23 +587,34 @@ export default function App() {
           <div className="keychain-note">
             <ShieldCheck size={16} />
             <div>
-              Keys stay with you.<span>Secured by your OS keychain</span>
+              Credentials stay local<span>Stored in your OS keychain</span>
             </div>
           </div>
           <button className="sidebar-link" onClick={() => setSettings(true)}>
             <Settings2 size={16} /> Settings
-            <SlidersHorizontal size={13} className="muted" />
           </button>
-          <div className="vibe-note">
-            <span className="tiny-dot" /> 100% vibecoded. Just for fun.
-          </div>
+          <div className="vibe-note">100% vibecoded. Just for fun.</div>
         </div>
       </aside>
       <main>
         <header className="topbar">
           <div className="topbar-title">
-            <span className="section-index">01 /</span>
-            <h1>File explorer</h1>
+            <Button
+              id="navigation-toggle"
+              className="navigation-toggle"
+              variant="ghost"
+              size="icon"
+              aria-label="Toggle navigation"
+              aria-controls="workspace-navigation"
+              aria-expanded={navigationOpen}
+              onClick={() => setNavigationOpen((open) => !open)}
+            >
+              {navigationOpen ? <X size={19} /> : <Menu size={19} />}
+            </Button>
+            <div>
+              <h1>File explorer</h1>
+              <p>Local folders and object storage, side by side.</p>
+            </div>
           </div>
           <div className="topbar-right">
             <span className="environment">
@@ -619,8 +644,11 @@ export default function App() {
           <div className="browser-notice">
             <Terminal size={15} />
             <span>
-              Desktop preview · Launch with <code>npm run desktop dev</code> for
-              filesystem and S3 access.
+              <strong>Desktop preview</strong>
+              <span>
+                Launch with <code>npm run desktop dev</code> for filesystem and
+                S3 access.
+              </span>
             </span>
           </div>
         )}
@@ -665,6 +693,7 @@ export default function App() {
                 <button
                   key={view}
                   className={preferences.view === view ? "active" : ""}
+                  aria-pressed={preferences.view === view}
                   aria-label={`${view} pane layout`}
                   title={`${view} pane layout`}
                   onClick={() => preferences.set({ view })}
@@ -723,7 +752,7 @@ export default function App() {
             >
               <div className="pane-heading">
                 <span>
-                  <HardDrive size={16} /> LOCAL FILES
+                  <HardDrive size={16} /> Local files
                 </span>
                 <Button
                   variant="ghost"
@@ -812,7 +841,7 @@ export default function App() {
             >
               <div className="pane-heading">
                 <span>
-                  <Cloud size={16} /> REMOTE STORAGE
+                  <Cloud size={16} /> Remote storage
                   {profile && (
                     <span className="provider-tag">
                       {profile.provider.toUpperCase()}

@@ -89,7 +89,12 @@ export function Queue({
       aria-label="Transfer queue"
     >
       <div className="queue-heading">
-        <button className="queue-title" onClick={toggle}>
+        <button
+          className="queue-title"
+          onClick={toggle}
+          aria-expanded={open}
+          aria-controls="transfer-queue-content"
+        >
           {open ? <ChevronDown size={15} /> : <ChevronUp size={15} />} Transfer
           queue <span className="count">{active}</span>
         </button>
@@ -119,12 +124,13 @@ export function Queue({
         </Button>
       </div>
       {open && (
-        <>
+        <div id="transfer-queue-content" className="queue-content">
           <div className="queue-tabs">
             {["all", "active", "completed", "failed", "paused"].map((value) => (
               <button
                 key={value}
                 className={tab === value ? "active" : ""}
+                aria-pressed={tab === value}
                 onClick={() => setTab(value)}
               >
                 {value.charAt(0).toUpperCase() + value.slice(1)}
@@ -141,13 +147,10 @@ export function Queue({
                   <span>
                     {jobs.length
                       ? "No transfers in this view"
-                      : "All clear. Ready when you are."}
+                      : "No transfers queued"}
                   </span>
                 </div>
-                <p>
-                  Transfers run in Rust. Upload progress counts
-                  provider-confirmed parts.
-                </p>
+                <p>Queued uploads and downloads appear here.</p>
               </div>
             ) : (
               filtered.map((job) => (
@@ -247,7 +250,7 @@ export function Queue({
               ))
             )}
           </div>
-        </>
+        </div>
       )}
     </section>
   );
