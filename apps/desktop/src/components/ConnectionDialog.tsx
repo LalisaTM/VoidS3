@@ -83,6 +83,7 @@ export function ConnectionDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [tested, setTested] = useState(false);
+  const [saved, setSaved] = useState(!!initial);
   const client = useQueryClient();
   const patch = (value: Partial<Profile>) => {
     setProfile((p) => ({ ...p, ...value }));
@@ -110,6 +111,7 @@ export function ConnectionDialog({
               }
             : null,
       });
+      setSaved(true);
       await client.invalidateQueries({ queryKey: ["profiles"] });
       if (test) {
         await api("test_connection", { id: profile.id });
@@ -245,12 +247,12 @@ export function ConnectionDialog({
           <label>
             Access key ID
             <input
-              required={!initial}
+              required={!saved}
               autoComplete="off"
               value={access}
               onChange={(e) => setAccess(e.target.value)}
               placeholder={
-                initial ? "Leave blank to keep credentials" : "Access key ID"
+                saved ? "Leave blank to keep credentials" : "Access key ID"
               }
             />
           </label>
@@ -258,7 +260,7 @@ export function ConnectionDialog({
             Secret access key
             <input
               type="password"
-              required={!initial}
+              required={!saved}
               autoComplete="new-password"
               value={secret}
               onChange={(e) => setSecret(e.target.value)}

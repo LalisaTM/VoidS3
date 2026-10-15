@@ -262,6 +262,7 @@ export default function App() {
             title: entry.name,
             description: "UTF-8 text · maximum 512 KiB · read-only",
             content: <pre className="text-preview">{text}</pre>,
+            label: "Done",
             execute: async () => {},
           });
         }

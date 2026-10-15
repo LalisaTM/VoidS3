@@ -1,4 +1,4 @@
-VoidS3's first experimental release: a fully vibecoded Rust/Tauri S3 desktop client and shared CLI, with real bucket browsing, streaming transfers, persistent multipart recovery, secure credential storage, and additions-only sync preview.
+VoidS3 0.1.1 fixes saving a connection immediately after "Save & test", makes the text-preview completion button close its dialog, and includes a regression test. It preserves the initial experimental Rust/Tauri S3 desktop client and shared CLI, with real bucket browsing, streaming transfers, persistent multipart recovery, OS-keychain credential storage, and additions-only sync preview.
 
 No human has read, reviewed, edited, or otherwise manually intervened in this code. It was built for fun by AI agents. This is not a security-audited or production-ready release.
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 — 2026-10-15
+
+- Fix saving a new connection after "Save & test" clears its transient credential fields; the saved OS-keychain reference can now be reused immediately.
+- Make the text-preview completion button close the dialog.
+- Ignore generated Vite caches and add a regression test for the saved-connection flow.
+
 ## 0.1.0 — 2026-10-15
 
 Initial experimental, fully vibecoded release.
