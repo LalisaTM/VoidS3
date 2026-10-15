@@ -1,6 +1,6 @@
 # VoidS3
 
-[![CI](https://github.com/LalisaTM/VoidS3/actions/workflows/ci.yml/badge.svg)](https://github.com/LalisaTM/VoidS3/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/LalisaTM/VoidS3?include_prereleases)](https://github.com/LalisaTM/VoidS3/releases) [![License: MIT](https://img.shields.io/badge/License-MIT-c7f9a6)](LICENSE)
+[![CI](https://github.com/LalisaTM/VoidS3/actions/workflows/ci.yml/badge.svg)](https://github.com/LalisaTM/VoidS3/actions/workflows/ci.yml) [![Build](https://github.com/LalisaTM/VoidS3/actions/workflows/build.yml/badge.svg)](https://github.com/LalisaTM/VoidS3/actions/workflows/build.yml) [![Release](https://img.shields.io/github/v/release/LalisaTM/VoidS3?include_prereleases)](https://github.com/LalisaTM/VoidS3/releases) [![License: MIT](https://img.shields.io/badge/License-MIT-c7f9a6)](LICENSE)
 
 A native S3 desktop client built with Rust, Tauri 2, and React 19. Cloudflare R2 first, with configurable S3-compatible endpoints. Windows is the primary target.
 
@@ -27,6 +27,8 @@ Uploads do not overwrite existing objects. Downloads do not overwrite local file
 ## Install
 
 Windows installers and CLI archives are published under [Releases](https://github.com/LalisaTM/VoidS3/releases). Builds are unsigned: Windows may show a SmartScreen warning. No automatic updater is included. Linux and macOS are checked in CI; signed distribution packages for those platforms are unfinished.
+
+Every branch push also runs [Build](https://github.com/LalisaTM/VoidS3/actions/workflows/build.yml). Open a successful run and download its `voids3-windows-x64-<commit>` artifact for the installer, CLI ZIP, SHA-256 checksums, and build details. These unsigned development builds expire after 14 days and require GitHub sign-in to download. Fork pull requests build automatically too; manual runs can select a branch. Version tags continue to publish prereleases under Releases.
 
 ## Develop
 

@@ -4,6 +4,10 @@
 
 CI runs frontend formatting, strict TypeScript/build, ESLint, Vitest, npm and RustSec dependency audits, version consistency, Rust fmt/Clippy/tests on Windows/Linux/macOS, and a local Moto S3 integration job. Local S3 tests are an emulator contract suite, not proof of cloud compatibility. Actions are pinned to commit SHAs and updated by Dependabot. Workflow permissions default to read-only; only release publication gets contents-write. Main is protected against force pushes/deletion and requires all five CI jobs, including for administrators, without a human-review requirement.
 
+The separate **Build** workflow packages the Windows x64 NSIS installer and CLI on every branch push, fork pull request, and manual run. Same-repository PR events skip a duplicate build because their commits already build on push. It uses read-only repository permissions, requires no signing or provider secrets, and publishes no release. Only main-branch pushes save the release build cache. A newer push cancels an older build for that branch.
+
+To try a branch build, open [Build runs](https://github.com/LalisaTM/VoidS3/actions/workflows/build.yml), select a successful run for the desired branch/commit, and use its summary download link or Artifacts section. GitHub sign-in is required. The `voids3-windows-x64-<commit>` artifact contains the unsigned installer, `voids3-cli-windows-x64.zip`, `build-info.json` (version, commit, ref, and run URL), and `SHA256SUMS.txt`. Artifacts are retained for 14 days. These builds retain the branch's package version; the commit identifies the exact build. Tags remain the source of versioned prereleases.
+
 Versions follow SemVer, starting at `0.1.0`. Until 1.0, minor releases may change behavior; patch releases fix defects. Set a version with:
 
 ```sh

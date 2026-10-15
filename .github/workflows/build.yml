@@ -1,0 +1,83 @@
+name: Build
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    name: Windows installer and CLI
+    # Same-repository PR commits already build on push; fork PRs build here.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: windows-release
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - run: npm ci
+      - run: npm run version:check
+      - run: npm run lint
+      - run: npm test
+      - name: Build Windows installer
+        run: npm run desktop build -- --bundles nsis -- --locked
+      - name: Build CLI
+        run: cargo build --release --locked -p voids3-cli
+      - name: Package downloads
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path build-assets -ErrorAction Stop | Out-Null
+          $installers = @(Get-ChildItem -Path target/release/bundle/nsis/*-setup.exe -File -ErrorAction Stop)
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
+          Copy-Item -LiteralPath $installers[0].FullName -Destination build-assets/
+          Compress-Archive -Path target/release/voids3.exe,README.md,LICENSE -DestinationPath build-assets/voids3-cli-windows-x64.zip
+          @{
+            version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+            commit = $env:GITHUB_SHA
+            ref = $env:GITHUB_REF
+            run = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            signed = $false
+          } | ConvertTo-Json | Set-Content build-assets/build-info.json -Encoding utf8
+          Get-ChildItem build-assets -File | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)"
+          } | Set-Content build-assets/SHA256SUMS.txt -Encoding ascii
+      - name: Upload Windows downloads
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: voids3-windows-x64-${{ github.sha }}
+          path: build-assets/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Add download link to summary
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        shell: pwsh
+        run: |
+          @"
+          ### Windows build
+          [Download installer, CLI, and SHA-256 checksums]($env:ARTIFACT_URL)
+
+          Commit: $env:GITHUB_SHA
+
+          Unsigned experimental build. Artifacts expire after 14 days. GitHub sign-in is required to download Actions artifacts.
+          "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
