@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useFileDragDrop } from "./lib/useFileDragDrop";
+import { useUpdater } from "./lib/useUpdater";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -94,6 +95,7 @@ interface Prompt {
 export default function App() {
   const query = useQueryClient();
   const preferences = usePreferences();
+  const updater = useUpdater(preferences.checkUpdatesAutomatically);
   const [connectionId, setConnectionId] = useState("");
   const [connectionForm, setConnectionForm] = useState<Profile | "new">();
   const [settings, setSettings] = useState(false);
@@ -842,6 +844,19 @@ export default function App() {
               </button>
             </div>
           )}
+          {updater.update && !updater.busy && (
+            <div className="global-notice update-notice" role="status">
+              <ArrowDownToLine size={14} />
+              <span>VoidS3 {updater.update.version} is available.</span>
+              <Button
+                variant="ghost"
+                size="small"
+                onClick={() => setSettings(true)}
+              >
+                Review update
+              </Button>
+            </div>
+          )}
           {notice && (
             <div className="global-notice" role="status">
               <Check size={14} />
@@ -1284,7 +1299,13 @@ export default function App() {
           onSaved={connect}
         />
       )}
-      {settings && <SettingsDialog onClose={() => setSettings(false)} />}
+      {settings && (
+        <SettingsDialog
+          onClose={() => setSettings(false)}
+          updater={updater}
+          activeTransfers={active}
+        />
+      )}
       {sync && profile && (
         <SyncDialog
           profile={profile}

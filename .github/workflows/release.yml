@@ -14,6 +14,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+      actions: read
     env:
       CARGO_BUILD_JOBS: 2
     steps:
@@ -25,6 +26,15 @@ jobs:
         run: |
           git merge-base --is-ancestor $env:GITHUB_SHA origin/main
           if ($LASTEXITCODE -ne 0) { throw "Release tags must point to a commit already merged into main" }
+      - name: Require successful CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runs = gh run list --repo $env:GITHUB_REPOSITORY --workflow ci.yml --commit $env:GITHUB_SHA --json conclusion,event | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Cannot read CI status" }
+          if (-not @($runs | Where-Object { $_.conclusion -eq 'success' -and $_.event -in @('push', 'workflow_dispatch') }).Count) { throw "The tagged main commit must have successful CI before release" }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -39,22 +49,57 @@ jobs:
       - run: npm run version:check
       - run: npm run lint
       - run: npm test
-      - run: npm run desktop build -- --bundles nsis
+      - run: npm run test:release
+      - name: Build and sign Windows updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: pwsh
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY -or -not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) { throw "Updater signing secrets are required" }
+          npm run desktop build -- --bundles nsis --config src-tauri/tauri.release.conf.json -- --locked
+          if ($LASTEXITCODE -ne 0) { throw "Signed desktop build failed" }
       - run: cargo build --release --locked -p voids3-cli
       - name: Package CLI and checksums
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path release-assets | Out-Null
           Copy-Item target/release/bundle/nsis/*-setup.exe release-assets/
+          Copy-Item target/release/bundle/nsis/*-setup.exe.sig release-assets/
           Compress-Archive -Path target/release/voids3.exe,README.md,LICENSE -DestinationPath release-assets/voids3-cli-windows-x64.zip
+          node scripts/updater-manifest.mjs release-assets
+          if ($LASTEXITCODE -ne 0) { throw "Updater manifest generation failed" }
           Get-ChildItem release-assets -File | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content release-assets/SHA256SUMS.txt
+      - name: Verify updater package with embedded public key
+        shell: pwsh
+        run: |
+          $env:VOIDS3_UPDATE_MANIFEST = (Resolve-Path release-assets/latest.json).Path
+          $env:VOIDS3_UPDATE_PACKAGE = (Get-ChildItem release-assets/*-setup.exe -File).FullName
+          cargo test --release -p voids3-desktop --locked published_package_matches_embedded_key -- --ignored
+          if ($LASTEXITCODE -ne 0) { throw "Updater signature verification failed; release will not be published" }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-release
           path: release-assets/*
+          if-no-files-found: error
       - name: Publish experimental release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release create $env:GITHUB_REF_NAME release-assets/* --verify-tag --prerelease --title "VoidS3 $env:GITHUB_REF_NAME — vibecoded experiment" --notes-file docs/release-notes.md
+          $ErrorActionPreference = 'Stop'
+          $existing = gh release view $env:GITHUB_REF_NAME --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($existing | ConvertFrom-Json).isDraft) { throw "Refusing to replace a published release" }
+            gh release upload $env:GITHUB_REF_NAME release-assets/* --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME release-assets/* --verify-tag --draft --title "VoidS3 $env:GITHUB_REF_NAME - vibecoded experiment" --notes-file docs/release-notes.md
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Release asset upload failed" }
+          if ($env:GITHUB_REF_NAME.Contains('-')) {
+            gh release edit $env:GITHUB_REF_NAME --draft=false --prerelease --latest=false
+          } else {
+            gh release edit $env:GITHUB_REF_NAME --draft=false --prerelease=false --latest
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Release publication failed" }

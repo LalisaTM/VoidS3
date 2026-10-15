@@ -8,7 +8,7 @@ A native S3 desktop client built with Rust, Tauri 2, and React 19. Cloudflare R2
 
 **This project is completely vibecoded for fun. No human has read, reviewed, modified, edited, or otherwise manually intervened in any of this code.** AI agents handle the implementation, commits, pushing, branching, CI configuration, tests, versioning, and release setup. Humans supplied the idea, specification, and visual design references and started the experiment.
 
-Automated checks are not human review or a security audit. This is an experimental **0.1.1** release, not a claim of production readiness. Use disposable credentials and test buckets first. The original specification is in [docs/brief.md](docs/brief.md); it describes the intended product, including features that are still unfinished.
+Automated checks are not human review or a security audit. This is an experimental **0.2.0** release, not a claim of production readiness. Use disposable credentials and test buckets first. The original specification is in [docs/brief.md](docs/brief.md); it describes the intended product, including features that are still unfinished.
 
 ## What is implemented
 
@@ -33,9 +33,17 @@ Uploads do not overwrite existing objects. Downloads do not overwrite local file
 
 ## Install
 
-Windows installers and CLI archives are published under [Releases](https://github.com/LalisaTM/VoidS3/releases). Builds are unsigned: Windows may show a SmartScreen warning. No automatic updater is included. Linux and macOS are checked in CI; signed distribution packages for those platforms are unfinished.
+Windows installers and CLI archives are published under [Releases](https://github.com/LalisaTM/VoidS3/releases). Installers are not Authenticode-signed, so Windows may show a SmartScreen warning. Windows x64 releases include a cryptographically signed self-updater. Linux and macOS are checked in CI; signed distribution packages for those platforms are unfinished.
 
-Every branch push also runs [Build](https://github.com/LalisaTM/VoidS3/actions/workflows/build.yml). Open a successful run and download its `voids3-windows-x64-<commit>` artifact for the installer, CLI ZIP, SHA-256 checksums, and build details. These unsigned development builds expire after 14 days and require GitHub sign-in to download. Fork pull requests build automatically too; manual runs can select a branch. Version tags continue to publish prereleases under Releases.
+Every branch push also runs [Build](https://github.com/LalisaTM/VoidS3/actions/workflows/build.yml). Open a successful run and download its `voids3-windows-x64-<commit>` artifact for the installer, CLI ZIP, SHA-256 checksums, and build details. These unsigned development builds expire after 14 days and require GitHub sign-in to download. Fork pull requests build automatically too; manual runs can select a branch. Version tags publish under Releases; normal versions are marked latest so installed apps can discover them. Explicit SemVer prereleases are excluded from automatic update discovery.
+
+## Updates
+
+From version 0.2.0 onward, Windows x64 checks GitHub Releases at startup and once a day. Open **Settings > Application updates** to check manually, read release notes, or install. Automatic checks can be disabled. Downloads and installation require an explicit **Install and restart** confirmation; stop running/queued transfers first. Failed checks or downloads can be retried.
+
+The Rust updater requires HTTPS release assets from this repository and verifies their signatures and signed versions with an embedded public key. It rejects altered packages and older/equal versions. The application closes for the per-user installer and reopens afterward, preserving its profiles, credentials, and paused queue. This signature is separate from Windows Authenticode signing.
+
+**Install 0.2.0 manually once if you are using 0.1.1 or earlier**; those versions have no updater. CLI, Linux, and macOS upgrades remain manual. See [release and signing details](docs/releases.md).
 
 ## Develop
 

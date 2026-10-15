@@ -26,6 +26,7 @@ jobs:
       - run: npm run format:check
       - run: npm run lint
       - run: npm test
+      - run: npm run test:release
       - run: npm run build
       - run: npm audit --audit-level=moderate
   rust:

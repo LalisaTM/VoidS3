@@ -108,6 +108,17 @@ pub struct Engine {
     controls: Mutex<HashMap<String, Control>>,
     files: Arc<Semaphore>,
     requests: Arc<Semaphore>,
+    maintenance: std::sync::atomic::AtomicBool,
+}
+/// Holds the queue idle while a desktop update is downloaded and installed.
+/// Dropping the guard after a failed update allows transfers again.
+pub struct MaintenanceGuard(Arc<Engine>);
+impl Drop for MaintenanceGuard {
+    fn drop(&mut self) {
+        self.0
+            .maintenance
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 impl Engine {
     pub fn new(store: Arc<Store>, settings: TransferSettings) -> Result<Arc<Self>> {
@@ -127,6 +138,7 @@ impl Engine {
             controls: Mutex::new(HashMap::new()),
             files: Arc::new(Semaphore::new(settings.concurrent_files)),
             requests: Arc::new(Semaphore::new(settings.max_requests)),
+            maintenance: std::sync::atomic::AtomicBool::new(false),
         }))
     }
     pub fn list(&self) -> Result<Vec<Transfer>> {
@@ -225,7 +237,6 @@ impl Engine {
             priority: 0,
             settings,
         };
-        self.save(&job)?;
         self.start(s3, job)?;
         Ok(id)
     }
@@ -246,6 +257,12 @@ impl Engine {
         }
         {
             let mut controls = self.controls.lock().map_err(lock)?;
+            if self.maintenance.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(Error::Conflict(
+                    "An application update is in progress. Try the transfer again after updating."
+                        .into(),
+                ));
+            }
             if controls.contains_key(&job.id) {
                 return Err(Error::Invalid("Transfer is already running".into()));
             }
@@ -326,6 +343,28 @@ impl Engine {
             .ok_or_else(|| Error::Invalid("Transfer is not running".into()))?;
         control.token.cancel();
         Ok(())
+    }
+    pub fn begin_maintenance(self: &Arc<Self>) -> Result<MaintenanceGuard> {
+        let controls = self.controls.lock().map_err(lock)?;
+        if !controls.is_empty()
+            || self
+                .jobs
+                .lock()
+                .map_err(lock)?
+                .values()
+                .any(|job| job.status.active() || job.status == Status::Queued)
+        {
+            return Err(Error::Conflict("Pause or cancel all running and queued transfers, wait until they stop, then install the update.".into()));
+        }
+        if self
+            .maintenance
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err(Error::Conflict(
+                "An application update is already in progress".into(),
+            ));
+        }
+        Ok(MaintenanceGuard(self.clone()))
     }
     /// Signal every worker, including workers waiting for a file/request permit,
     /// before any network or credential work can delay a global stop.
@@ -809,6 +848,40 @@ mod tests {
         for control in &controls {
             assert!(control.cancel.load(std::sync::atomic::Ordering::Relaxed));
         }
+    }
+    #[test]
+    fn updater_guard_requires_idle_workers_and_blocks_resume_until_released() {
+        let (_dir, engine, mut job) = fixture();
+        let guard = engine.begin_maintenance().unwrap();
+        assert!(engine.begin_maintenance().is_err());
+        let client = S3::new(
+            job.target.clone(),
+            voids3_core::Credentials {
+                access_key: "isolated-test".into(),
+                secret_key: "isolated-test".into(),
+                session_token: None,
+            },
+            0,
+        )
+        .unwrap();
+        assert!(engine.resume(client, &job.id).is_err());
+        assert_eq!(engine.get(&job.id).unwrap().status, Status::Paused);
+        assert!(engine.controls.lock().unwrap().is_empty());
+        drop(guard);
+        assert!(engine.begin_maintenance().is_ok());
+        job.status = Status::Queued;
+        engine.save(&job).unwrap();
+        assert!(engine.begin_maintenance().is_err());
+        job.status = Status::Paused;
+        engine.save(&job).unwrap();
+        engine.controls.lock().unwrap().insert(
+            job.id.clone(),
+            Control {
+                token: CancellationToken::new(),
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        assert!(engine.begin_maintenance().is_err());
     }
     #[test]
     fn idle_cancel_removes_only_owned_partial_and_preserves_completed_files() {

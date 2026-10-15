@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod updater;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
@@ -258,8 +259,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let app = Arc::new(App::open()?);
     tauri::Builder::default()
         .manage(app)
+        .manage(updater::Updates::default())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![dispatch])
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            dispatch,
+            updater::check_for_updates,
+            updater::install_update
+        ])
         .run(tauri::generate_context!())?;
     Ok(())
 }

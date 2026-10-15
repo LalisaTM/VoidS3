@@ -11,6 +11,7 @@ interface Preferences {
   view: "dual" | "remote" | "local";
   hidden: boolean;
   queueOpen: boolean;
+  checkUpdatesAutomatically: boolean;
   bookmarks: Bookmark[];
   set: (patch: Partial<Omit<Preferences, "set">>) => void;
 }
@@ -21,6 +22,7 @@ export const usePreferences = create<Preferences>()(
       view: "dual",
       hidden: false,
       queueOpen: true,
+      checkUpdatesAutomatically: true,
       bookmarks: [],
       set,
     }),

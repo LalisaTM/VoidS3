@@ -1,4 +1,66 @@
 @import "tailwindcss";
+.update-panel {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.update-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.update-heading h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+.update-heading p {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--faint);
+}
+.update-panel > .button {
+  align-self: flex-start;
+}
+.update-notes summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.update-notes pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow: auto;
+  margin-top: 10px;
+  font: inherit;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.update-confirm {
+  border-left: 2px solid var(--accent);
+  padding-left: 12px;
+}
+.update-confirm > div {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.update-warning {
+  color: var(--warning);
+}
+.update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.update-notice {
+  flex-wrap: wrap;
+}
 @theme {
   --font-sans:
     "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont,
