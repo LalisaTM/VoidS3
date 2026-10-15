@@ -1,9 +1,55 @@
 //! Application use cases shared across Tauri IPC and CLI.
-use std::{path::PathBuf, sync::Arc};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 use voids3_core::{Error, Result, TransferSettings};
 use voids3_s3::S3;
 use voids3_storage::Store;
-use voids3_transfer::{Direction, Engine};
+use voids3_transfer::{Direction, Engine, Status};
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchControl {
+    Pause,
+    Resume,
+    Cancel,
+}
+
+#[derive(Default, Serialize)]
+pub struct BatchControlResult {
+    pub requested: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct DeleteEntry {
+    pub path: String,
+    pub etag: Option<String>,
+}
+
+#[derive(Default, Serialize)]
+pub struct DeleteResult {
+    pub deleted: Vec<String>,
+    pub failed: usize,
+    pub errors: Vec<String>,
+}
+impl DeleteResult {
+    fn record(&mut self, path: String, outcome: Result<()>) {
+        match outcome {
+            Ok(()) => self.deleted.push(path),
+            Err(error) => {
+                self.failed += 1;
+                if self.errors.len() < 20 {
+                    self.errors.push(format!("{path}: {error}"));
+                }
+            }
+        }
+    }
+}
 
 pub struct App {
     pub store: Arc<Store>,
@@ -46,6 +92,75 @@ impl App {
     pub fn save_settings(&self, settings: TransferSettings) -> Result<()> {
         settings.validate()?;
         self.store.put("settings", "transfers", &settings)
+    }
+    pub async fn control_all(&self, operation: BatchControl) -> Result<BatchControlResult> {
+        let interrupted: HashSet<_> = match operation {
+            BatchControl::Pause => self.engine.interrupt_all(false)?,
+            BatchControl::Cancel => self.engine.interrupt_all(true)?,
+            BatchControl::Resume => Vec::new(),
+        }
+        .into_iter()
+        .collect();
+        let mut result = BatchControlResult {
+            requested: interrupted.len(),
+            ..Default::default()
+        };
+        if matches!(operation, BatchControl::Pause) {
+            return Ok(result);
+        }
+        let mut clients: HashMap<String, std::result::Result<S3, String>> = HashMap::new();
+        for job in self.engine.list()? {
+            if interrupted.contains(&job.id)
+                || match operation {
+                    BatchControl::Resume => job.status != Status::Paused,
+                    BatchControl::Cancel => {
+                        job.status == Status::Completed
+                            || (job.status == Status::Cancelled
+                                && job.upload_id.is_none()
+                                && job.error.is_none())
+                    }
+                    BatchControl::Pause => true,
+                }
+            {
+                continue;
+            }
+            let outcome = async {
+                if matches!(operation, BatchControl::Cancel)
+                    && self.engine.request_cancel(&job.id)?
+                {
+                    return Ok(());
+                }
+                if !clients.contains_key(&job.profile_id) {
+                    clients.insert(
+                        job.profile_id.clone(),
+                        self.client(&job.profile_id)
+                            .await
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                let client = clients
+                    .get(&job.profile_id)
+                    .expect("client inserted")
+                    .clone()
+                    .map_err(Error::Provider)?;
+                match operation {
+                    BatchControl::Cancel => self.engine.cancel(client, &job.id),
+                    BatchControl::Resume => self.engine.resume(client, &job.id),
+                    BatchControl::Pause => Ok(()),
+                }
+            }
+            .await;
+            match outcome {
+                Ok(()) => result.requested += 1,
+                Err(error) => {
+                    result.failed += 1;
+                    if result.errors.len() < 20 {
+                        result.errors.push(format!("{}: {error}", job.key));
+                    }
+                }
+            }
+        }
+        Ok(result)
     }
     pub async fn client(&self, id: &str) -> Result<S3> {
         let store = self.store.clone();
@@ -115,6 +230,51 @@ impl App {
         }
         Ok(ids)
     }
+    pub async fn delete_entries(
+        &self,
+        id: Option<&str>,
+        entries: Vec<DeleteEntry>,
+    ) -> Result<DeleteResult> {
+        if entries.is_empty()
+            || entries.len() > 100_000
+            || entries.iter().any(|entry| entry.path.is_empty())
+        {
+            return Err(Error::Invalid(
+                "Select between 1 and 100,000 items to delete".into(),
+            ));
+        }
+        if let Some(id) = id {
+            if entries.iter().any(|entry| entry.path.ends_with('/')) {
+                return Err(Error::Invalid(
+                    "Select remote files, not folder prefixes, to delete".into(),
+                ));
+            }
+            let client = self.client(id).await?;
+            client.profile.writable()?;
+            let mut result = DeleteResult::default();
+            for entry in entries {
+                let outcome = match entry.etag.as_deref().filter(|etag| !etag.is_empty()) {
+                    Some(etag) => client.delete(&entry.path, Some(etag)).await,
+                    None => Err(Error::Invalid(
+                        "Object has no listed ETag; refresh before deleting".into(),
+                    )),
+                };
+                result.record(entry.path, outcome);
+            }
+            Ok(result)
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let mut result = DeleteResult::default();
+                for entry in entries {
+                    let outcome = voids3_platform::recycle(std::path::Path::new(&entry.path));
+                    result.record(entry.path, outcome);
+                }
+                result
+            })
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))
+        }
+    }
     pub async fn download(
         &self,
         id: &str,
@@ -124,17 +284,57 @@ impl App {
         let client = self.client(id).await?;
         let settings = self.settings()?;
         let mut pending = Vec::new();
+        let mut directories = Vec::new();
         for key in keys {
             if key.ends_with('/') {
-                return Err(Error::Invalid(
-                    "Select files. Use sync preview for recursive directory downloads".into(),
+                let folder = key
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default();
+                if folder.is_empty() {
+                    return Err(Error::Invalid("Choose a named remote folder".into()));
+                }
+                directories.push(voids3_platform::download_target(&directory, folder)?);
+                for entry in client.scan(&key).await? {
+                    if entry.path.ends_with('/') {
+                        continue;
+                    }
+                    let path = folder_download_target(&directory, &key, &entry.path)?;
+                    pending.push((entry.path, path));
+                    if pending.len() > 100_000 {
+                        return Err(Error::Invalid(
+                            "A download selection is limited to 100,000 files".into(),
+                        ));
+                    }
+                }
+            } else {
+                let name = key.rsplit('/').next().unwrap_or_default();
+                pending.push((
+                    key.clone(),
+                    voids3_platform::download_target(&directory, name)?,
                 ));
             }
-            let name = key.rsplit('/').next().unwrap_or_default();
-            pending.push((
-                key.clone(),
-                voids3_platform::download_target(&directory, name)?,
-            ));
+        }
+        if pending.len() + self.engine.list()?.len() > 100_000 {
+            return Err(Error::Invalid("Queue limit is 100,000 files".into()));
+        }
+        let mut targets = HashSet::new();
+        for (_, path) in &pending {
+            if !targets.insert(path.clone()) {
+                return Err(Error::Conflict(
+                    "Selected objects map to the same local filename; download them separately"
+                        .into(),
+                ));
+            }
+        }
+        for path in directories {
+            tokio::fs::create_dir_all(path).await?;
+        }
+        for (_, path) in &pending {
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
         }
         let mut ids = Vec::new();
         for (key, path) in pending {
@@ -202,5 +402,59 @@ impl App {
             );
         }
         Ok(ids)
+    }
+}
+
+fn folder_download_target(directory: &std::path::Path, prefix: &str, key: &str) -> Result<PathBuf> {
+    let folder = prefix
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    let relative = key.strip_prefix(prefix).ok_or_else(|| {
+        Error::Invalid("Provider returned a key outside the selected folder".into())
+    })?;
+    voids3_platform::download_target(directory, &format!("{folder}/{relative}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_downloads_preserve_hierarchy_and_reject_unsafe_provider_keys() {
+        let root = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(
+            folder_download_target(&root, "releases/assets/", "releases/assets/nested/file.txt")
+                .unwrap(),
+            root.join("assets").join("nested").join("file.txt")
+        );
+        for key in [
+            "other/file.txt",
+            "releases/assets/../escape.txt",
+            "releases/assets/C:/escape.txt",
+            "releases/assets/nested\\escape.txt",
+        ] {
+            assert!(
+                folder_download_target(&root, "releases/assets/", key).is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_delete_reports_partial_success_and_bounds_error_details() {
+        let mut result = DeleteResult::default();
+        result.record("deleted.txt".into(), Ok(()));
+        for index in 0..25 {
+            result.record(
+                format!("failed-{index}.txt"),
+                Err(Error::Conflict("Object changed".into())),
+            );
+        }
+        assert_eq!(result.deleted, ["deleted.txt"]);
+        assert_eq!(result.failed, 25);
+        assert_eq!(result.errors.len(), 20);
+        assert!(result.errors[0].contains("failed-0.txt"));
     }
 }

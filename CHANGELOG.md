@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Rebuild the desktop workspace around the supplied Figma design, with charcoal/violet themes, compact navigation, flat split panes, working search/bookmarks/activity, and keyboard pane resizing.
+- Add global pause/resume/cancel controls across all connections, immediate worker interruption before credential lookup, and retained cleanup failures for retry.
+- Add pointer-based file/folder/group transfers between panes and native Explorer drop targeting without disabling Windows file-drop support.
+- Add recursive remote-folder downloads and confirmed multi-item deletion through the toolbar, context menu, or Delete key, preserving failed selections for retry.
+- Automatically build Windows installer/CLI artifacts with checksums on every branch push, fork pull request, or manual workflow run.
+
 ## 0.1.1 — 2026-10-15
 
 - Fix saving a new connection after "Save & test" clears its transient credential fields; the saved OS-keychain reference can now be reused immediately.

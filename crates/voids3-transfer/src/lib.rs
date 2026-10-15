@@ -327,6 +327,49 @@ impl Engine {
         control.token.cancel();
         Ok(())
     }
+    /// Signal every worker, including workers waiting for a file/request permit,
+    /// before any network or credential work can delay a global stop.
+    pub fn interrupt_all(&self, cancel: bool) -> Result<Vec<String>> {
+        let controls = self.controls.lock().map_err(lock)?;
+        for control in controls.values() {
+            if cancel {
+                control
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            control.token.cancel();
+        }
+        Ok(controls.keys().cloned().collect())
+    }
+    /// Returns false only when an idle multipart upload needs its provider client
+    /// for remote cleanup. Running workers already own that client.
+    pub fn request_cancel(&self, id: &str) -> Result<bool> {
+        let controls = self.controls.lock().map_err(lock)?;
+        if let Some(control) = controls.get(id) {
+            control
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            control.token.cancel();
+            return Ok(true);
+        }
+        let mut job = self.get(id)?;
+        if job.status == Status::Completed {
+            return Ok(true);
+        }
+        if job.upload_id.is_some() {
+            return Ok(false);
+        }
+        if job.direction == Direction::Download
+            && let Err(error) = std::fs::remove_file(partial_path(&job))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.into());
+        }
+        job.status = Status::Cancelled;
+        job.error = None;
+        self.save(&job)?;
+        Ok(true)
+    }
     pub fn resume(self: &Arc<Self>, s3: S3, id: &str) -> Result<()> {
         let mut job = self.get(id)?;
         if !matches!(job.status, Status::Paused | Status::Failed) {
@@ -341,15 +384,8 @@ impl Engine {
         Ok(())
     }
     pub fn cancel(self: &Arc<Self>, s3: S3, id: &str) -> Result<()> {
-        {
-            let controls = self.controls.lock().map_err(lock)?;
-            if let Some(control) = controls.get(id) {
-                control
-                    .cancel
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                control.token.cancel();
-                return Ok(());
-            }
+        if self.request_cancel(id)? {
+            return Ok(());
         }
         let mut job = self.get(id)?;
         if job.status == Status::Completed
@@ -371,7 +407,10 @@ impl Engine {
         let ids: Vec<_> = jobs
             .values()
             .filter(|j| {
-                j.status.terminal() && !controls.contains_key(&j.id) && j.upload_id.is_none()
+                j.status.terminal()
+                    && !controls.contains_key(&j.id)
+                    && j.upload_id.is_none()
+                    && j.error.is_none()
             })
             .map(|j| j.id.clone())
             .collect();
@@ -704,6 +743,118 @@ fn lock(e: impl std::fmt::Display) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture() -> (tempfile::TempDir, Arc<Engine>, Transfer) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("queue.db")).unwrap());
+        let engine = Engine::new(store, TransferSettings::default()).unwrap();
+        let target = voids3_core::Profile {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "Isolated test".into(),
+            provider: voids3_core::Provider::Custom,
+            endpoint: "https://example.invalid".into(),
+            region: "test".into(),
+            bucket: "test".into(),
+            prefix: String::new(),
+            path_style: true,
+            read_only: false,
+            allow_http: false,
+        };
+        let job = Transfer {
+            id: uuid::Uuid::new_v4().to_string(),
+            profile_id: target.id.clone(),
+            target,
+            direction: Direction::Download,
+            local_path: dir.path().join("finished.bin"),
+            key: "file.bin".into(),
+            size: 20,
+            bytes_done: 10,
+            status: Status::Paused,
+            error: None,
+            created: 0,
+            part_size: 16 * voids3_core::MIB,
+            upload_id: None,
+            parts: BTreeMap::new(),
+            source: None,
+            remote_etag: Some("test-etag".into()),
+            priority: 0,
+            settings: TransferSettings::default(),
+        };
+        engine.save(&job).unwrap();
+        (dir, engine, job)
+    }
+    #[test]
+    fn global_interrupt_signals_queued_and_running_workers_without_credentials() {
+        let (_dir, engine, _) = fixture();
+        let controls: Vec<_> = ["waiting-for-permit", "uploading"]
+            .into_iter()
+            .map(|id| {
+                let control = Control {
+                    token: CancellationToken::new(),
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                };
+                engine
+                    .controls
+                    .lock()
+                    .unwrap()
+                    .insert(id.into(), control.clone());
+                control
+            })
+            .collect();
+        assert_eq!(engine.interrupt_all(false).unwrap().len(), 2);
+        for control in &controls {
+            assert!(control.token.is_cancelled());
+            assert!(!control.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        }
+        assert_eq!(engine.interrupt_all(true).unwrap().len(), 2);
+        for control in &controls {
+            assert!(control.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        }
+    }
+    #[test]
+    fn idle_cancel_removes_only_owned_partial_and_preserves_completed_files() {
+        let (_dir, engine, mut job) = fixture();
+        std::fs::write(partial_path(&job), "partial").unwrap();
+        std::fs::write(&job.local_path, "completed separately").unwrap();
+        assert!(engine.request_cancel(&job.id).unwrap());
+        assert!(!partial_path(&job).exists());
+        assert_eq!(
+            std::fs::read_to_string(&job.local_path).unwrap(),
+            "completed separately"
+        );
+        assert_eq!(engine.get(&job.id).unwrap().status, Status::Cancelled);
+        job.status = Status::Completed;
+        engine.save(&job).unwrap();
+        assert!(engine.request_cancel(&job.id).unwrap());
+        assert_eq!(engine.get(&job.id).unwrap().status, Status::Completed);
+    }
+    #[test]
+    fn idle_multipart_cancel_requires_cleanup_and_finished_clear_keeps_failures() {
+        let (_dir, engine, mut job) = fixture();
+        job.direction = Direction::Upload;
+        job.upload_id = Some("unfinished-session".into());
+        engine.save(&job).unwrap();
+        assert!(!engine.request_cancel(&job.id).unwrap());
+        assert_eq!(engine.get(&job.id).unwrap().status, Status::Paused);
+        job.status = Status::Cancelled;
+        engine.save(&job).unwrap();
+        engine.clear_finished().unwrap();
+        assert!(engine.get(&job.id).is_ok());
+        job.upload_id = None;
+        job.error = Some("Partial cleanup failed".into());
+        engine.save(&job).unwrap();
+        engine.clear_finished().unwrap();
+        assert!(engine.get(&job.id).is_ok());
+        assert!(engine.request_cancel(&job.id).unwrap());
+        engine.clear_finished().unwrap();
+        assert!(engine.get(&job.id).is_err());
+        assert!(
+            engine
+                .store
+                .list::<Transfer>("transfers")
+                .unwrap()
+                .is_empty()
+        );
+    }
     #[tokio::test]
     async fn fingerprint_detects_changed_source() {
         let dir = tempfile::tempdir().unwrap();

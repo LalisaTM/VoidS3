@@ -60,6 +60,32 @@ function Harness() {
   );
 }
 describe("file navigation", () => {
+  it("uses the shared filter and only displays storage classes actually supplied", () => {
+    const props = {
+      entries: entries.map((entry) =>
+        entry.name === "alpha.json"
+          ? { ...entry, storage_class: "GLACIER" }
+          : entry,
+      ),
+      selected: [],
+      onSelect: vi.fn(),
+      onOpen: vi.fn(),
+      loading: false,
+      connected: true,
+      remote: true,
+      onAction: vi.fn(),
+      onRetry: vi.fn(),
+      showFilter: false,
+    };
+    const { rerender } = render(<Files {...props} filter=".json" />);
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expect(screen.getByRole("option")).toHaveTextContent("GLACIER");
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    rerender(<Files {...props} filter=".txt" />);
+    expect(screen.getByRole("option")).toHaveTextContent("beta.txt");
+    expect(screen.queryByText("STANDARD")).not.toBeInTheDocument();
+    expect(screen.queryByText("GLACIER")).not.toBeInTheDocument();
+  });
   it("sorts folders first, supports range selection, and filters only loaded entries", async () => {
     render(<Harness />);
     const rows = screen.getAllByRole("option");

@@ -64,6 +64,7 @@ mod tests {
             size: 1,
             modified: None,
             etag: Some("not-md5".into()),
+            storage_class: None,
         }
     }
     #[test]

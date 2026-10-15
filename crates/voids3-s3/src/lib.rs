@@ -113,6 +113,7 @@ impl S3 {
                     size: 0,
                     modified: None,
                     etag: None,
+                    storage_class: None,
                 });
             }
         }
@@ -132,6 +133,9 @@ impl S3 {
                     size: object.size().unwrap_or(0).max(0) as u64,
                     modified: object.last_modified().map(|t| t.secs()),
                     etag: object.e_tag().map(str::to_owned),
+                    storage_class: object
+                        .storage_class()
+                        .map(|value| value.as_str().to_owned()),
                 });
             }
         }

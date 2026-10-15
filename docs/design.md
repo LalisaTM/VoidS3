@@ -2,65 +2,26 @@
 
 ## Design read and audit
 
-VoidS3 is a desktop storage client for developers and storage administrators. The
-direction is calm, precise, and practical: native system typography, charcoal or
-paper surfaces, and the existing sage accent. Design variance 4, motion intensity
-3, visual density 6.
+VoidS3 is a native file manager for developers and storage administrators. The user supplied a Figma Make reference, replacing the earlier sage direction with a charcoal and violet workspace. Design variance 4, motion intensity 3, visual density 7.
 
-The design-taste-frontend skill excludes dashboards and data tables from its main
-marketing workflow. This refresh applies its audit, consistency, accessibility,
-and restraint guidance to the existing Radix primitives and owned button
-components. It does not add a second design system.
+The design-taste-frontend skill excludes dashboards and data tables from its marketing workflow. This redesign applies its audit, consistency, readability, and motion guidance to the existing React/Radix components. No second design system, external fonts, or decorative images are added.
 
-Before the refresh, the shell used 9-12 px labels, many boxed toolbar bands, faint
-helper text, an ornamental section number, and repeated connection prompts. The
-panes lost useful space on laptop screens, and the page forced an 860 px minimum
-width. Existing strengths are the geometric V mark, sage brand color, paired
-local/remote navigation, virtualized rows, persistent layout preferences, and
-accurate transfer progress.
+The reference establishes the layered square mark, compact top navigation, 226 px connection sidebar, global command bar, flat split panes, path bars, and bottom transfer queue. Its tiny labels are enlarged where needed for readability. Its sample accounts, files, latency, throughput, ETA, TLS version, and app version are excluded from the implementation.
 
 ## Implementation decisions
 
-- Preserve branding, primary navigation, field names and order, file operations,
-  keyboard selection, connection management, and all backend behavior.
-- Give the workspace title, pane titles, controls, and secondary metadata distinct
-  type sizes. Use the operating system's UI fonts without network font requests.
-- Use a consistent spacing and radius scale, quieter dividers, and a single accent
-  for selected states and primary actions. Keep errors and download indicators
-  semantic. Functional helper text must remain readable in both themes.
-- Keep file rows compact and virtualized. Size table columns by the actual pane
-  width, including when a pane is resized or shown alone.
-- Stack panes on narrow screens and expose navigation with a disclosure button.
-  On short desktop windows, allow the workspace to scroll rather than clipping
-  file actions. Do not rely on horizontal page overflow.
-- Use brief opacity/transform transitions for dialogs and menus, plus direct hover
-  and press feedback. Respect reduced motion. Do not animate file positions or
-  invent transfer activity.
-- Keep browser preview visibly disconnected. Empty states explain the actual
-  next step; listings and throughput always come from real data.
+- Match the reference's hierarchy, violet palette, flat dividers, source badges, compact tables, and layered mark. Keep native system fonts and readable text in both themes.
+- Wire Files, Transfers, Bookmarks, Search, and Activity to actual application state. Search filters loaded entries; Activity displays current alerts. Storage class is displayed only when the provider returns it.
+- Preserve local and remote navigation, settings, connections, properties, copy, signed URLs, text preview, sync, and keyboard selection. Saved folder pairs navigate once to the stored prefix.
+- Keep lists virtualized and columns responsive to pane width. Support pointer and keyboard resizing. Stack panes and disclose navigation on narrow screens, with scrollable short-window layouts.
+- Keep Pause all, Resume all, and Cancel all visible in the queue header. Expose selected-file deletion in the command bar, context menu, and keyboard. Confirm destructive operations and report partial failures.
+- Use pointer dragging between panes while retaining Tauri native Explorer drops. Highlight the actual target folder, use a lightweight drag ghost, and support Escape cancellation. Writable-connection restrictions remain enforced in Rust.
+- Use short dialog/menu transitions and immediate feedback. Respect reduced motion. Do not animate file positions or fabricate transfer progress.
 
-## Contextual preflight
+## Contextual preflight and verification
 
-Marketing heroes, photography, testimonials, pricing, conversion sections, and
-scroll storytelling are not applicable to this native file manager. No generated
-images, external fonts, or additional component packages are needed. Validate the
-dark and light shells, connection and settings dialogs, pane layouts, queue
-disclosure, keyboard focus, narrow widths, short windows, and existing component
-tests. Native filesystem/keychain behavior is outside this visual change.
+Marketing heroes, photography, pricing, testimonials, and scroll storytelling do not fit this workspace. Browser preview remains visibly disconnected and has no filesystem or keychain access.
 
-## Verification
+Browser checks cover 1440 x 900, 1280 x 800, 1024 x 768, and 390 x 844, including both themes, queue disclosure, responsive controls, navigation focus restoration, and dialogs. A temporary browser-only fixture exercises 500 synthetic entries, long Unicode names, storage classes, and a failed transfer; it is removed after inspection. Automated tests cover the meaningful selection, navigation, confirmation, cancellation, and drop-target behavior.
 
-- Browser checks at 1440 x 900, 1366 x 768, 1280 x 800, 1024 x 768,
-  1366 x 600, and 390 x 844. Check both themes, single/dual panes,
-  expanded/collapsed queue, navigation disclosure with Escape/focus restoration,
-  and scrollable connection/settings dialogs with visible footer actions.
-- A temporary browser-only component fixture exercised 500 synthetic entries,
-  a long Unicode filename, a resized 300 px pane, and a failed-transfer row.
-  The lists rendered 50 rows across two panes, preserved ellipsis, and had no
-  horizontal overflow. The fixture was removed and is not part of the app.
-- Measured theme tokens meet 4.5:1 for secondary text on selected surfaces and
-  3:1 for control borders on raised surfaces. Reduced-motion CSS disables all
-  added transitions and animations.
-- All 11 frontend tests pass, including navigation and queue disclosure state.
-  ESLint, TypeScript/production build, Prettier, and version consistency pass.
-  Rust and provider behavior are unchanged; the PR runs the existing CI matrix.
+Native GUI execution, real Explorer drops, OS keychain round trips, and live R2 remain outside the verified browser/emulator scope. See [validation.md](validation.md) for the exact evidence and limitations.

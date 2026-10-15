@@ -5,13 +5,12 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
-  ListFilter,
   Pause,
   Play,
   RotateCw,
   X,
 } from "lucide-react";
-import { bytes, type Transfer } from "../lib/api";
+import { bytes, type Transfer, type BatchOperation } from "../lib/api";
 import { Button } from "./ui/button";
 export function Queue({
   jobs,
@@ -19,12 +18,16 @@ export function Queue({
   toggle,
   control,
   clear,
+  bulkControl,
+  bulkBusy = false,
 }: {
   jobs: Transfer[];
   open: boolean;
   toggle: () => void;
   control: (id: string, operation: string) => void;
   clear: () => void;
+  bulkControl?: (operation: BatchOperation) => void;
+  bulkBusy?: boolean;
 }) {
   const [tab, setTab] = useState("all");
   const [samples, setSamples] = useState<{ time: number; value: number }[]>([]);
@@ -98,6 +101,65 @@ export function Queue({
           {open ? <ChevronDown size={15} /> : <ChevronUp size={15} />} Transfer
           queue <span className="count">{active}</span>
         </button>
+        {bulkControl && (
+          <div
+            className="queue-bulk-actions"
+            aria-label="Control all transfers"
+          >
+            <Button
+              variant="ghost"
+              size="small"
+              disabled={bulkBusy || !active}
+              onClick={() => bulkControl("pause")}
+            >
+              <Pause size={13} /> Pause all
+            </Button>
+            <Button
+              variant="ghost"
+              size="small"
+              disabled={
+                bulkBusy || !jobs.some((job) => job.status === "paused")
+              }
+              onClick={() => bulkControl("resume")}
+            >
+              <Play size={13} /> Resume all
+            </Button>
+            <Button
+              variant="ghost"
+              size="small"
+              className="cancel-all"
+              disabled={
+                bulkBusy ||
+                !jobs.some(
+                  (job) =>
+                    job.status !== "completed" &&
+                    (job.status !== "cancelled" ||
+                      !!job.upload_id ||
+                      !!job.error),
+                )
+              }
+              onClick={() => bulkControl("cancel")}
+            >
+              <X size={13} /> Cancel all
+            </Button>
+          </div>
+        )}
+        {open && (
+          <select
+            className="queue-filter"
+            aria-label="Filter transfers"
+            value={tab}
+            onChange={(e) => setTab(e.target.value)}
+          >
+            {["all", "active", "completed", "failed", "paused"].map((value) => (
+              <option key={value} value={value}>
+                {value === "all"
+                  ? `All (${jobs.length})`
+                  : value.charAt(0).toUpperCase() + value.slice(1)}
+              </option>
+            ))}
+          </select>
+        )}
         <div className="queue-speed">
           <svg
             width="170"
@@ -117,7 +179,14 @@ export function Queue({
         <Button
           variant="ghost"
           size="small"
-          disabled={!jobs.some((j) => j.status === "completed")}
+          className="clear-finished"
+          disabled={
+            !jobs.some(
+              (j) =>
+                j.status === "completed" ||
+                (j.status === "cancelled" && !j.upload_id && !j.error),
+            )
+          }
           onClick={clear}
         >
           Clear finished
@@ -125,20 +194,6 @@ export function Queue({
       </div>
       {open && (
         <div id="transfer-queue-content" className="queue-content">
-          <div className="queue-tabs">
-            {["all", "active", "completed", "failed", "paused"].map((value) => (
-              <button
-                key={value}
-                className={tab === value ? "active" : ""}
-                aria-pressed={tab === value}
-                onClick={() => setTab(value)}
-              >
-                {value.charAt(0).toUpperCase() + value.slice(1)}
-                {value === "all" && <span>{jobs.length}</span>}
-              </button>
-            ))}
-            <ListFilter size={14} className="muted" />
-          </div>
           <div className="queue-list">
             {!filtered.length ? (
               <div className="queue-empty">
@@ -235,7 +290,8 @@ export function Queue({
                       </Button>
                     )}
                     {(!["completed", "cancelled"].includes(job.status) ||
-                      (job.status === "cancelled" && !!job.upload_id)) && (
+                      (job.status === "cancelled" &&
+                        (!!job.upload_id || !!job.error))) && (
                       <Button
                         size="icon"
                         variant="ghost"

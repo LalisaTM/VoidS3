@@ -5,13 +5,14 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { useFileDragDrop } from "./lib/useFileDragDrop";
 import {
   ArrowDownToLine,
   ArrowLeft,
   ArrowRight,
   ArrowUp,
   ArrowUpFromLine,
+  Archive,
   Bookmark,
   Check,
   ChevronDown,
@@ -19,15 +20,15 @@ import {
   CloudOff,
   Copy,
   FolderOpen,
+  FolderPlus,
   HardDrive,
-  LayoutPanelLeft,
   LockKeyhole,
-  Menu,
   MoreHorizontal,
   Plus,
   RefreshCw,
   Settings2,
   ShieldCheck,
+  Trash2,
   Terminal,
   Unplug,
   Workflow,
@@ -41,6 +42,9 @@ import {
   message,
   parent,
   type FileEntry,
+  type BatchOperation,
+  type BatchControlResult,
+  type DeleteResult,
   type Page,
   type Profile,
   type Transfer,
@@ -49,6 +53,8 @@ import { usePreferences } from "./store";
 import { version } from "../package.json";
 import { Button } from "./components/ui/button";
 import { ConnectionDialog } from "./components/ConnectionDialog";
+import { WorkspaceHeader } from "./components/WorkspaceHeader";
+import { SplitHandle } from "./components/SplitHandle";
 import { Files } from "./components/Files";
 import { Modal } from "./components/Modal";
 import { Queue } from "./components/Queue";
@@ -82,15 +88,20 @@ interface Prompt {
   label?: string;
   destructive?: boolean;
   content?: ReactNode;
+  keepOpen?: boolean;
   execute: (value: string) => Promise<void>;
 }
 export default function App() {
   const query = useQueryClient();
   const preferences = usePreferences();
-  const setPreferences = preferences.set;
   const [connectionId, setConnectionId] = useState("");
   const [connectionForm, setConnectionForm] = useState<Profile | "new">();
   const [settings, setSettings] = useState(false);
+  const [mainView, setMainView] = useState<"files" | "transfers">("files");
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [focusedSide, setFocusedSide] = useState<"local" | "remote">("local");
   const [navigationOpen, setNavigationOpen] = useState(false);
   useEffect(() => {
     if (navigationOpen)
@@ -99,6 +110,7 @@ export default function App() {
         ?.focus();
   }, [navigationOpen]);
   const [sync, setSync] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [prompt, setPrompt] = useState<Prompt>();
@@ -155,39 +167,6 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = preferences.theme;
   }, [preferences.theme]);
-  useEffect(() => {
-    if (!desktop) return;
-    let cleanup: (() => void) | undefined;
-    let disposed = false;
-    void getCurrentWebview()
-      .onDragDropEvent((event) => {
-        if (event.payload.type === "drop" && profile && !profile.read_only) {
-          const paths = event.payload.paths;
-          setPrompt({
-            title: `Upload ${paths.length} dropped item(s)?`,
-            description: `Destination: ${profile.bucket}/${remote.path}. Existing remote objects will be preserved.`,
-            execute: async () => {
-              await api("upload", {
-                id: profile.id,
-                paths,
-                prefix: remote.path,
-              });
-              setPreferences({ queueOpen: true });
-            },
-          });
-        }
-      })
-      .then((unlisten) => {
-        if (disposed) unlisten();
-        else cleanup = unlisten;
-      })
-      .catch((e: unknown) => setError(message(e)));
-    return () => {
-      disposed = true;
-      cleanup?.();
-    };
-  }, [profile, remote.path, setPreferences]);
-
   async function run(work: () => Promise<void>) {
     setError("");
     try {
@@ -203,13 +182,17 @@ export default function App() {
       query.invalidateQueries({ queryKey: ["transfers"] }),
     ]);
   }
-  function connect(p: Profile) {
+  function connect(p: Profile, prefix = p.prefix) {
     setConnectionId(p.id);
     setRemoteStart(p.prefix);
-    remote.go(p.prefix);
+    remote.go(prefix);
     setRemoteSelection([]);
   }
-  async function upload(paths?: string[], folder = false) {
+  async function upload(
+    paths?: string[],
+    folder = false,
+    prefix = remote.path,
+  ) {
     if (!profile) {
       setConnectionForm("new");
       return;
@@ -225,23 +208,23 @@ export default function App() {
     await api("upload", {
       id: profile.id,
       paths: typeof picked === "string" ? [picked] : picked,
-      prefix: remote.path,
+      prefix,
     });
     preferences.set({ queueOpen: true });
   }
-  async function download(keys?: string[]) {
+  async function download(keys?: string[], directory = local.path) {
     if (!profile) return;
     const chosen = keys ?? remoteSelection;
     if (!chosen.length) {
       setError("Select remote files to download.");
       return;
     }
-    if (!local.path)
+    if (!directory)
       throw new Error("Choose a local destination directory first.");
     await api("download", {
       id: profile.id,
       keys: chosen,
-      directory: local.path,
+      directory,
     });
     preferences.set({ queueOpen: true });
   }
@@ -275,12 +258,106 @@ export default function App() {
         }
       },
       label: isRemote ? "Load text preview" : "Done",
+      keepOpen: isRemote,
+    });
+  }
+  function deleteSelected(isRemote: boolean, selected: FileEntry[]) {
+    if (!selected.length) return;
+    if (
+      isRemote &&
+      (profile?.read_only || selected.some((entry) => entry.is_dir))
+    ) {
+      setError("Select remote files from a writable connection to delete.");
+      return;
+    }
+    const id = isRemote ? profile?.id : null;
+    if (isRemote && !id) return;
+    setPrompt({
+      title: isRemote
+        ? `Delete ${selected.length} file(s)?`
+        : `Recycle ${selected.length} item(s)?`,
+      description: isRemote
+        ? "Deletes the selected current objects. Provider versioning may retain older versions. Changed objects are protected by their listed ETags."
+        : "Moves the selected local items to the operating system recycle bin.",
+      destructive: true,
+      label: isRemote ? "Delete files" : "Move to recycle bin",
+      content: (
+        <div className="delete-preview">
+          {selected.slice(0, 10).map((entry) => (
+            <code key={entry.path}>{entry.path}</code>
+          ))}
+          {selected.length > 10 && <span>and {selected.length - 10} more</span>}
+        </div>
+      ),
+      execute: async () => {
+        const result = await api<DeleteResult>("delete_entries", {
+          id,
+          entries: selected.map((entry) => ({
+            path: entry.path,
+            etag: entry.etag,
+          })),
+        });
+        const deleted = new Set(result.deleted);
+        (isRemote ? setRemoteSelection : setLocalSelection)((previous) =>
+          previous.filter((path) => !deleted.has(path)),
+        );
+        await refresh();
+        setNotice(
+          `${result.deleted.length} item(s) ${isRemote ? "deleted" : "moved to recycle bin"}.`,
+        );
+        if (result.failed)
+          setError(
+            `${result.failed} item(s) could not be deleted. ${result.errors.join("; ")}`,
+          );
+      },
+    });
+  }
+  async function controlAll(operation: BatchOperation) {
+    setBulkBusy(true);
+    try {
+      const result = await api<BatchControlResult>("transfer_control_all", {
+        operation,
+      });
+      await query.invalidateQueries({ queryKey: ["transfers"] });
+      setNotice(
+        `${operation === "pause" ? "Pause" : operation === "resume" ? "Resume" : "Cancellation"} requested for ${result.requested} transfer(s). In-flight requests may finish before stopping.`,
+      );
+      if (result.failed)
+        throw new Error(
+          `${result.failed} transfer(s) need attention: ${result.errors.join("; ")}`,
+        );
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+  function bulkControl(operation: BatchOperation) {
+    if (operation !== "cancel") {
+      void run(() => controlAll(operation));
+      return;
+    }
+    setPrompt({
+      title: "Cancel all transfers?",
+      description:
+        "Cancels running, queued, paused, and failed transfers across every connection. Completed files remain. Multipart uploads and temporary download files are cleaned up where possible.",
+      destructive: true,
+      label: "Cancel all transfers",
+      execute: () => controlAll("cancel"),
     });
   }
   function action(isRemote: boolean, name: string, entry?: FileEntry) {
     const base = isRemote ? remote.path : local.path;
     if (name === "connect") {
       setConnectionForm("new");
+      return;
+    }
+    if (name === "delete-selected") {
+      const paths = new Set(isRemote ? remoteSelection : localSelection);
+      deleteSelected(
+        isRemote,
+        (isRemote ? entries : (localFiles.data ?? [])).filter((item) =>
+          paths.has(item.path),
+        ),
+      );
       return;
     }
     if (name === "mkdir") {
@@ -342,22 +419,7 @@ export default function App() {
       return;
     }
     if (name === "delete") {
-      setPrompt({
-        title: isRemote ? "Delete this object?" : "Move to recycle bin?",
-        description: `${entry.path}${isRemote ? ". This removes the current object. Provider versioning may retain older versions." : ". The operating system handles recycling."}`,
-        destructive: true,
-        label: isRemote ? "Delete object" : "Recycle",
-        execute: async () => {
-          if (isRemote && profile)
-            await api("remote_delete", {
-              id: profile.id,
-              key: entry.path,
-              etag: entry.etag,
-            });
-          else await api("local_delete", { path: entry.path });
-          await refresh();
-        },
-      });
+      deleteSelected(isRemote, [entry]);
       return;
     }
     if (name === "rename" || name === "copy")
@@ -381,6 +443,89 @@ export default function App() {
       });
   }
   const readonly = !!profile?.read_only;
+  const focusedRemote = focusedSide === "remote";
+  const focusedSelection = focusedRemote ? remoteSelection : localSelection;
+  const focusedPaths = new Set(focusedSelection);
+  const focusedEntries = (
+    focusedRemote ? entries : (localFiles.data ?? [])
+  ).filter((entry) => focusedPaths.has(entry.path));
+  const canDelete =
+    desktop &&
+    focusedEntries.length > 0 &&
+    focusedEntries.length === focusedSelection.length &&
+    (!focusedRemote ||
+      (!!profile &&
+        !readonly &&
+        focusedEntries.every((entry) => !entry.is_dir)));
+  const signedEntry =
+    remoteSelection.length === 1
+      ? entries.find(
+          (entry) => entry.path === remoteSelection[0] && !entry.is_dir,
+        )
+      : undefined;
+  const connected = !!profile && remoteFiles.isSuccess;
+  const currentError =
+    error ||
+    [profiles.error, home.error, localFiles.error, remoteFiles.error]
+      .filter(Boolean)
+      .map(message)
+      .join("\n");
+  const drag = useFileDragDrop({
+    canUpload: desktop && !!profile && !readonly,
+    canDownload: desktop && !!profile && !!local.path,
+    onSelect: (side, paths) =>
+      (side === "local" ? setLocalSelection : setRemoteSelection)(paths),
+    onTransfer: (source, paths, target) =>
+      void run(() =>
+        source === "local"
+          ? upload(paths, false, target.path)
+          : download(paths, target.path),
+      ),
+    onError: setError,
+    onExternalDrop: (paths, target) => {
+      if (target?.side !== "remote") {
+        setError(
+          "Drop files onto the remote pane or a remote folder to upload.",
+        );
+        return;
+      }
+      if (!profile) {
+        setConnectionForm("new");
+        setError("Connect a bucket before dropping files.");
+        return;
+      }
+      if (readonly) {
+        setError("This connection is read-only.");
+        return;
+      }
+      if (!paths.length) return;
+      setPrompt({
+        title: `Upload ${paths.length} dropped item(s)?`,
+        description: `Destination: ${profile.bucket}/${target.path}. Existing objects will not be overwritten.`,
+        label: "Upload items",
+        execute: () => upload(paths, false, target.path),
+      });
+    },
+  });
+  function showView(view: "files" | "transfers") {
+    setMainView(view);
+    setNavigationOpen(false);
+    if (view === "transfers") preferences.set({ queueOpen: true });
+  }
+  function bookmarkPair() {
+    if (!profile || !local.path) return;
+    preferences.set({
+      bookmarks: [
+        ...preferences.bookmarks,
+        {
+          label: `${profile.bucket}/${remote.path}`,
+          profile: profile.id,
+          prefix: remote.path,
+          local: local.path,
+        },
+      ],
+    });
+  }
   return (
     <div
       className="app-shell"
@@ -391,601 +536,747 @@ export default function App() {
         }
       }}
     >
-      <aside
-        id="workspace-navigation"
-        aria-label="Workspace navigation"
-        className={`sidebar ${navigationOpen ? "open" : ""}`}
-      >
-        <div className="brand">
-          <svg viewBox="0 0 32 32" width="29" height="29" aria-hidden="true">
-            <path d="M3 5 16 28 29 5h-8l-5 10-5-10Z" fill="currentColor" />
-          </svg>
-          <span>
-            VoidS3<span className="brand-period">.</span>
-          </span>
-          <span className="version">{version}</span>
-        </div>
-        <div className="workspace-label">Workspace</div>
-        <button
-          className="sidebar-link selected"
-          onClick={() => preferences.set({ view: "dual" })}
+      <WorkspaceHeader
+        view={mainView}
+        onView={showView}
+        onBookmarks={() => setBookmarksOpen(true)}
+        onActivity={() => setActivityOpen(true)}
+        attention={
+          !!(
+            currentError ||
+            notice ||
+            jobs.some((job) => job.status === "failed")
+          )
+        }
+        search={search}
+        onSearch={setSearch}
+        navigationOpen={navigationOpen}
+        onNavigation={() => setNavigationOpen((open) => !open)}
+        layout={preferences.view}
+        onLayout={(view) => preferences.set({ view })}
+      />
+      <div className="workspace">
+        <aside
+          id="workspace-navigation"
+          aria-label="Workspace navigation"
+          className={`sidebar ${navigationOpen ? "open" : ""}`}
         >
-          <LayoutPanelLeft size={17} /> File explorer
-        </button>
-        <button
-          className="sidebar-link"
-          onClick={() => preferences.set({ queueOpen: !preferences.queueOpen })}
-        >
-          <ArrowDownToLine size={16} /> Transfers
-          {active > 0 && <span className="count">{active}</span>}
-        </button>
-        <div className="sidebar-section">
-          <span>Connections</span>
           <button
-            aria-label="Add connection"
+            className={`sidebar-link ${mainView === "files" ? "selected" : ""}`}
+            onClick={() => showView("files")}
+          >
+            <HardDrive size={17} /> Explorer
+          </button>
+          <button
+            className={`sidebar-link ${mainView === "transfers" ? "selected" : ""}`}
+            onClick={() => showView("transfers")}
+          >
+            <ArrowDownToLine size={16} /> Transfers
+            {active > 0 && <span className="count">{active}</span>}
+          </button>
+          <button
+            className="sidebar-link"
+            onClick={() => setConnectionForm(profile ?? "new")}
+          >
+            <ShieldCheck size={16} /> Credentials
+          </button>
+          <div className="sidebar-section">
+            <span>Connections</span>
+            <button
+              aria-label="Add connection"
+              onClick={() => setConnectionForm("new")}
+            >
+              <Plus size={15} />
+            </button>
+          </div>
+          <div className="connection-list">
+            {profiles.data?.map((p) => (
+              <div
+                className={`connection-item ${profile?.id === p.id ? "active" : ""}`}
+                key={p.id}
+              >
+                <button
+                  onClick={() => {
+                    connect(p);
+                    showView("files");
+                  }}
+                >
+                  <span
+                    className={`connection-dot ${profile?.id === p.id && remoteFiles.isSuccess ? "online" : ""}`}
+                  />
+                  <span>
+                    <strong>{p.name}</strong>
+                  </span>
+                </button>
+                <Dropdown.Root>
+                  <Dropdown.Trigger asChild>
+                    <button aria-label={`Manage ${p.name}`}>
+                      <MoreHorizontal size={14} />
+                    </button>
+                  </Dropdown.Trigger>
+                  <Dropdown.Portal>
+                    <Dropdown.Content className="dropdown">
+                      <Dropdown.Item onSelect={() => setConnectionForm(p)}>
+                        Edit connection
+                      </Dropdown.Item>
+                      <Dropdown.Item
+                        onSelect={() =>
+                          setConnectionForm({
+                            ...p,
+                            id: crypto.randomUUID(),
+                            name: `${p.name} copy`,
+                          })
+                        }
+                      >
+                        Duplicate (re-enter credentials)
+                      </Dropdown.Item>
+                      <Dropdown.Item
+                        onSelect={() =>
+                          void run(async () => {
+                            await navigator.clipboard.writeText(
+                              JSON.stringify(p, null, 2),
+                            );
+                            setNotice("Profile copied without credentials");
+                          })
+                        }
+                      >
+                        <Copy size={13} /> Export without secrets
+                      </Dropdown.Item>
+                      <Dropdown.Item
+                        onSelect={() =>
+                          void run(async () => {
+                            await api("test_connection", { id: p.id });
+                            setNotice("Bucket access verified");
+                          })
+                        }
+                      >
+                        Test bucket access
+                      </Dropdown.Item>
+                      <Dropdown.Item
+                        className="destructive"
+                        onSelect={() =>
+                          setPrompt({
+                            title: "Delete connection?",
+                            description: `Remove ${p.name} and its OS keychain credentials. Bucket objects are preserved.`,
+                            destructive: true,
+                            execute: async () => {
+                              await api("delete_profile", { id: p.id });
+                              await query.invalidateQueries({
+                                queryKey: ["profiles"],
+                              });
+                              if (connectionId === p.id) setConnectionId("");
+                            },
+                          })
+                        }
+                      >
+                        Delete connection…
+                      </Dropdown.Item>
+                    </Dropdown.Content>
+                  </Dropdown.Portal>
+                </Dropdown.Root>
+                {profile?.id === p.id && (
+                  <button
+                    className="connection-bucket"
+                    onClick={() => {
+                      connect(p);
+                      showView("files");
+                    }}
+                  >
+                    <Archive size={14} />
+                    <span>{p.bucket}</span>
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          {!profiles.data?.length && (
+            <div className="sidebar-empty">
+              <CloudOff size={20} />
+              <p>No connections yet</p>
+            </div>
+          )}
+          <button
+            className="add-connection"
             onClick={() => setConnectionForm("new")}
           >
-            <Plus size={15} />
+            <Plus size={14} /> New connection
           </button>
-        </div>
-        <div className="connection-list">
-          {profiles.data?.map((p) => (
-            <div
-              className={`connection-item ${profile?.id === p.id ? "active" : ""}`}
-              key={p.id}
-            >
-              <button onClick={() => connect(p)}>
-                <span
-                  className={`connection-dot ${profile?.id === p.id && remoteFiles.isSuccess ? "online" : ""}`}
-                />
-                <span>
-                  <strong>{p.name}</strong>
-                  <small>
-                    {p.provider === "r2"
-                      ? "Cloudflare R2"
-                      : p.provider.toUpperCase()}
-                  </small>
-                </span>
-              </button>
-              <Dropdown.Root>
-                <Dropdown.Trigger asChild>
-                  <button aria-label={`Manage ${p.name}`}>
-                    <MoreHorizontal size={14} />
-                  </button>
-                </Dropdown.Trigger>
-                <Dropdown.Portal>
-                  <Dropdown.Content className="dropdown">
-                    <Dropdown.Item onSelect={() => setConnectionForm(p)}>
-                      Edit connection
-                    </Dropdown.Item>
-                    <Dropdown.Item
-                      onSelect={() =>
-                        setConnectionForm({
-                          ...p,
-                          id: crypto.randomUUID(),
-                          name: `${p.name} copy`,
-                        })
-                      }
-                    >
-                      Duplicate (re-enter credentials)
-                    </Dropdown.Item>
-                    <Dropdown.Item
-                      onSelect={() =>
-                        void run(async () => {
-                          await navigator.clipboard.writeText(
-                            JSON.stringify(p, null, 2),
-                          );
-                          setNotice("Profile copied without credentials");
-                        })
-                      }
-                    >
-                      <Copy size={13} /> Export without secrets
-                    </Dropdown.Item>
-                    <Dropdown.Item
-                      onSelect={() =>
-                        void run(async () => {
-                          await api("test_connection", { id: p.id });
-                          setNotice("Bucket access verified");
-                        })
-                      }
-                    >
-                      Test bucket access
-                    </Dropdown.Item>
-                    <Dropdown.Item
-                      className="destructive"
-                      onSelect={() =>
-                        setPrompt({
-                          title: "Delete connection?",
-                          description: `Remove ${p.name} and its OS keychain credentials. Bucket objects are preserved.`,
-                          destructive: true,
-                          execute: async () => {
-                            await api("delete_profile", { id: p.id });
-                            await query.invalidateQueries({
-                              queryKey: ["profiles"],
-                            });
-                            if (connectionId === p.id) setConnectionId("");
-                          },
-                        })
-                      }
-                    >
-                      Delete connection…
-                    </Dropdown.Item>
-                  </Dropdown.Content>
-                </Dropdown.Portal>
-              </Dropdown.Root>
-            </div>
-          ))}
-        </div>
-        {!profiles.data?.length && (
-          <div className="sidebar-empty">
-            <CloudOff size={20} />
-            <p>No connections yet</p>
+          <div className="sidebar-bottom">
+            <button className="sidebar-link" onClick={() => setSettings(true)}>
+              <Settings2 size={16} /> Settings
+            </button>
+            <span className="version">v{version}</span>
           </div>
-        )}
-        <button
-          className="add-connection"
-          onClick={() => setConnectionForm("new")}
+        </aside>
+        <main
+          className={`workspace-content ${mainView === "transfers" ? "transfers-view" : ""}`}
         >
-          <Plus size={14} /> New connection
-        </button>
-        <div className="sidebar-section">
-          <span>Bookmarks</span>
-          <button
-            aria-label="Bookmark current pair"
-            disabled={!profile || !local.path}
-            onClick={() => {
-              if (profile)
-                preferences.set({
-                  bookmarks: [
-                    ...preferences.bookmarks,
-                    {
-                      label: `${profile.bucket}/${remote.path}`,
-                      profile: profile.id,
-                      prefix: remote.path,
-                      local: local.path,
-                    },
-                  ],
-                });
-            }}
-          >
-            <Plus size={15} />
-          </button>
-        </div>
-        {!preferences.bookmarks.length && (
-          <p className="sidebar-hint">
-            Keep a local folder and remote prefix together.
-          </p>
-        )}
-        {preferences.bookmarks.map((b, i) => (
-          <div className="bookmark-row" key={`${b.profile}-${i}`}>
-            <button
-              onClick={() => {
-                const p = profiles.data?.find((p) => p.id === b.profile);
-                if (p) {
-                  connect(p);
-                  remote.go(b.prefix);
-                  local.go(b.local);
-                }
-              }}
-            >
-              <Bookmark size={14} />
-              <span>{b.label}</span>
-            </button>
-            <button
-              aria-label={`Remove bookmark ${b.label}`}
-              onClick={() =>
-                preferences.set({
-                  bookmarks: preferences.bookmarks.filter((_, n) => n !== i),
-                })
-              }
-            >
-              <X size={12} />
-            </button>
-          </div>
-        ))}
-        <div className="sidebar-bottom">
-          <div className="keychain-note">
-            <ShieldCheck size={16} />
-            <div>
-              Credentials stay local<span>Stored in your OS keychain</span>
-            </div>
-          </div>
-          <button className="sidebar-link" onClick={() => setSettings(true)}>
-            <Settings2 size={16} /> Settings
-          </button>
-          <div className="vibe-note">100% vibecoded. Just for fun.</div>
-        </div>
-      </aside>
-      <main>
-        <header className="topbar">
-          <div className="topbar-title">
-            <Button
-              id="navigation-toggle"
-              className="navigation-toggle"
-              variant="ghost"
-              size="icon"
-              aria-label="Toggle navigation"
-              aria-controls="workspace-navigation"
-              aria-expanded={navigationOpen}
-              onClick={() => setNavigationOpen((open) => !open)}
-            >
-              {navigationOpen ? <X size={19} /> : <Menu size={19} />}
-            </Button>
-            <div>
-              <h1>File explorer</h1>
-              <p>Local folders and object storage, side by side.</p>
-            </div>
-          </div>
-          <div className="topbar-right">
-            <span className="environment">
-              <span
-                className={`tiny-dot ${profile && remoteFiles.isSuccess ? "online" : ""}`}
-              />
-              {profile
-                ? remoteFiles.isSuccess
-                  ? "Bucket connected"
-                  : remoteFiles.isError
-                    ? "Connection error"
-                    : "Connecting…"
-                : "No active connection"}
-            </span>
-            <span className="divider" />
-            <Button
-              size="icon"
-              variant="ghost"
-              aria-label="Settings"
-              onClick={() => setSettings(true)}
-            >
-              <Settings2 size={17} />
-            </Button>
-          </div>
-        </header>
-        {!desktop && (
-          <div className="browser-notice">
-            <Terminal size={15} />
-            <span>
-              <strong>Desktop preview</strong>
+          {!desktop && (
+            <div className="browser-notice">
+              <Terminal size={15} />
               <span>
-                Launch with <code>npm run desktop dev</code> for filesystem and
-                S3 access.
-              </span>
-            </span>
-          </div>
-        )}
-        <div className="workspace-toolbar">
-          <div className="connection-selector">
-            <Cloud size={17} />
-            <select
-              aria-label="Active connection"
-              value={profile?.id ?? ""}
-              onChange={(e) => {
-                const p = profiles.data?.find((p) => p.id === e.target.value);
-                if (p) connect(p);
-              }}
-            >
-              <option value="">Select a connection</option>
-              {profiles.data?.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} / {p.bucket}
-                </option>
-              ))}
-            </select>
-            <ChevronDown size={13} />
-          </div>
-          <div className="toolbar-actions">
-            <Button
-              disabled={!profile || !local.path}
-              onClick={() => setSync(true)}
-            >
-              <Workflow size={15} /> Synchronize
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Refresh listings"
-              disabled={!desktop}
-              onClick={() => void run(refresh)}
-            >
-              <RefreshCw size={15} />
-            </Button>
-            <div className="view-toggle" aria-label="Pane layout">
-              {(["dual", "local", "remote"] as const).map((view) => (
-                <button
-                  key={view}
-                  className={preferences.view === view ? "active" : ""}
-                  aria-pressed={preferences.view === view}
-                  aria-label={`${view} pane layout`}
-                  title={`${view} pane layout`}
-                  onClick={() => preferences.set({ view })}
-                >
-                  {view === "dual" ? (
-                    <LayoutPanelLeft size={15} />
-                  ) : view === "local" ? (
-                    <HardDrive size={15} />
-                  ) : (
-                    <Cloud size={15} />
-                  )}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-        {(error || profiles.error || home.error) && (
-          <div className="global-alert" role="alert">
-            <span>{error || message(profiles.error || home.error)}</span>
-            <button onClick={() => setError("")} aria-label="Dismiss error">
-              <X size={15} />
-            </button>
-          </div>
-        )}
-        {notice && (
-          <div className="global-notice" role="status">
-            <Check size={14} />
-            <span>{notice}</span>
-            <button
-              onClick={() => setNotice("")}
-              aria-label="Dismiss notification"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        )}
-        <div className={`panes ${preferences.view}`}>
-          {preferences.view !== "remote" && (
-            <section
-              className="pane local-pane"
-              onDragOver={(e) => {
-                if (
-                  e.dataTransfer.types.includes("application/x-voids3-remote")
-                )
-                  e.preventDefault();
-              }}
-              onDrop={(e) => {
-                const value = e.dataTransfer.getData(
-                  "application/x-voids3-remote",
-                );
-                if (value) {
-                  e.preventDefault();
-                  void run(() => download(JSON.parse(value) as string[]));
-                }
-              }}
-            >
-              <div className="pane-heading">
+                <strong>Desktop preview</strong>
                 <span>
-                  <HardDrive size={16} /> Local files
+                  Launch with <code>npm run desktop dev</code> for filesystem
+                  and S3 access.
                 </span>
+              </span>
+            </div>
+          )}
+          {mainView === "files" && (
+            <div className="commandbar" aria-label="File commands">
+              <div className="command-transfers">
+                <button
+                  disabled={!desktop || !profile || readonly}
+                  onClick={() =>
+                    void run(() =>
+                      upload(
+                        localSelection.length ? localSelection : undefined,
+                      ),
+                    )
+                  }
+                >
+                  <span className="action-icon upload">
+                    <ArrowUpFromLine size={16} />
+                  </span>
+                  <span>
+                    <strong>Upload</strong>
+                    <small>Local → S3</small>
+                  </span>
+                </button>
+                <button
+                  disabled={
+                    !desktop ||
+                    !profile ||
+                    !remoteSelection.length ||
+                    !local.path
+                  }
+                  onClick={() => void run(() => download())}
+                >
+                  <span className="action-icon download">
+                    <ArrowDownToLine size={16} />
+                  </span>
+                  <span>
+                    <strong>Download</strong>
+                    <small>S3 → Local</small>
+                  </span>
+                </button>
+              </div>
+              <span className="divider" />
+              <Button
+                variant="ghost"
+                disabled={
+                  !desktop ||
+                  (focusedRemote ? !profile || readonly : !local.path)
+                }
+                title={`Create a ${focusedSide} folder`}
+                aria-label="New folder"
+                onClick={() => action(focusedRemote, "mkdir")}
+              >
+                <FolderPlus size={15} />
+                <span>New folder</span>
+              </Button>
+              <Button
+                variant="ghost"
+                disabled={!signedEntry}
+                title="Copy a signed URL for one selected remote file; expires in 1 hour"
+                aria-label="Copy signed URL"
+                onClick={() =>
+                  signedEntry && action(true, "presign", signedEntry)
+                }
+              >
+                <Copy size={15} />
+                <span>Copy URL</span>
+              </Button>
+              <Button
+                variant="ghost"
+                disabled={!canDelete}
+                aria-label="Delete selected items"
+                title="Delete selected files from the focused pane"
+                onClick={() => deleteSelected(focusedRemote, focusedEntries)}
+              >
+                <Trash2 size={15} />
+                <span>
+                  Delete
+                  {focusedEntries.length ? ` (${focusedEntries.length})` : ""}
+                </span>
+              </Button>
+              <Button
+                variant="ghost"
+                disabled={!profile || !local.path}
+                title="Preview synchronization"
+                aria-label="Synchronize"
+                onClick={() => setSync(true)}
+              >
+                <Workflow size={15} />
+                <span>Synchronize</span>
+              </Button>
+              <div className="connection-health">
+                <span
+                  className={`connection-dot ${connected ? "online" : ""}`}
+                />
+                <div>
+                  <strong>
+                    {connected
+                      ? "Connected"
+                      : remoteFiles.isError
+                        ? "Connection error"
+                        : profile
+                          ? "Connecting…"
+                          : "Disconnected"}
+                  </strong>
+                  <small>
+                    {profile
+                      ? profile.provider.toUpperCase()
+                      : "Select a connection"}
+                  </small>
+                </div>
+              </div>
+            </div>
+          )}
+          {(error || profiles.error || home.error) && (
+            <div className="global-alert" role="alert">
+              <span>{error || message(profiles.error || home.error)}</span>
+              <button onClick={() => setError("")} aria-label="Dismiss error">
+                <X size={15} />
+              </button>
+            </div>
+          )}
+          {notice && (
+            <div className="global-notice" role="status">
+              <Check size={14} />
+              <span>{notice}</span>
+              <button
+                onClick={() => setNotice("")}
+                aria-label="Dismiss notification"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
+          <div
+            className={`panes ${preferences.view}`}
+            hidden={mainView !== "files"}
+          >
+            {preferences.view !== "remote" && (
+              <section
+                className={`pane local-pane ${focusedSide === "local" ? "focused-pane" : ""}`}
+                data-drop-side="local"
+                data-drop-path={local.path}
+                data-drop-active={drag.target?.side === "local" || undefined}
+                data-drop-hint={
+                  drag.target?.side === "local"
+                    ? `Drop to download: ${drag.target.path || "bucket root"}`
+                    : undefined
+                }
+                onFocusCapture={() => setFocusedSide("local")}
+                onPointerDownCapture={(event) => {
+                  setFocusedSide("local");
+                  drag.begin(event, "local", localSelection);
+                }}
+              >
+                <div className="pane-heading">
+                  <div className="pane-source">
+                    <span className="source-mark local">
+                      <HardDrive size={16} />
+                    </span>
+                    <div>
+                      <span className="eyebrow">LOCAL</span>
+                      <strong>My Computer</strong>
+                    </div>
+                  </div>
+                  <div className="pane-header-actions">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label="Refresh local listing"
+                      disabled={!desktop}
+                      onClick={() => void localFiles.refetch()}
+                    >
+                      <RefreshCw size={14} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="small"
+                      disabled={!desktop}
+                      onClick={() =>
+                        void run(async () => {
+                          const path = await openDialog({
+                            directory: true,
+                            title: "Open local folder",
+                          });
+                          if (typeof path === "string") {
+                            local.go(path);
+                            setLocalSelection([]);
+                          }
+                        })
+                      }
+                    >
+                      <FolderOpen size={14} /> Browse
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label="New local folder"
+                      disabled={!desktop || !local.path}
+                      onClick={() => action(false, "mkdir")}
+                    >
+                      <FolderPlus size={14} />
+                    </Button>
+                  </div>
+                </div>
+                <PathBar
+                  path={local.path}
+                  label="Local directory"
+                  back={local.back}
+                  forward={local.forward}
+                  canBack={local.canBack}
+                  canForward={local.canForward}
+                  up={() => {
+                    local.go(parent(local.path));
+                    setLocalSelection([]);
+                  }}
+                  navigate={(path) => {
+                    local.go(path);
+                    setLocalSelection([]);
+                  }}
+                  disabled={!desktop}
+                />
+                <Files
+                  canTransfer={desktop && !!profile && !readonly}
+                  dropPath={
+                    drag.target?.side === "local" ? drag.target.path : undefined
+                  }
+                  filter={search}
+                  showFilter={false}
+                  entries={localFiles.data ?? []}
+                  selected={localSelection}
+                  onSelect={setLocalSelection}
+                  onOpen={(entry) => {
+                    if (entry.is_dir) {
+                      local.go(entry.path);
+                      setLocalSelection([]);
+                    } else void run(() => showProperties(entry, false));
+                  }}
+                  loading={localFiles.isFetching}
+                  error={
+                    localFiles.error ? message(localFiles.error) : undefined
+                  }
+                  connected={desktop}
+                  onAction={(name, entry) => action(false, name, entry)}
+                  onRetry={() => void localFiles.refetch()}
+                />
+              </section>
+            )}
+            {preferences.view === "dual" && <SplitHandle />}
+            {preferences.view !== "local" && (
+              <section
+                className={`pane remote-pane ${focusedSide === "remote" ? "focused-pane" : ""}`}
+                data-drop-side="remote"
+                data-drop-path={remote.path}
+                data-drop-active={drag.target?.side === "remote" || undefined}
+                data-drop-hint={
+                  drag.target?.side === "remote"
+                    ? `Drop to upload: ${drag.target.path || "bucket root"}`
+                    : undefined
+                }
+                onFocusCapture={() => setFocusedSide("remote")}
+                onPointerDownCapture={(event) => {
+                  setFocusedSide("remote");
+                  drag.begin(event, "remote", remoteSelection);
+                }}
+              >
+                <div className="pane-heading">
+                  <div className="pane-source">
+                    <span className="source-mark remote">
+                      <Cloud size={16} />
+                    </span>
+                    <div>
+                      <span className="eyebrow">REMOTE</span>
+                      <select
+                        aria-label="Active connection"
+                        value={profile?.id ?? ""}
+                        onChange={(e) => {
+                          const selected = profiles.data?.find(
+                            (p) => p.id === e.target.value,
+                          );
+                          if (selected) connect(selected);
+                        }}
+                      >
+                        <option value="">Select a connection</option>
+                        {profiles.data?.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name} / {p.bucket}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="pane-header-actions">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label="Refresh remote listing"
+                      disabled={!profile}
+                      onClick={() => void remoteFiles.refetch()}
+                    >
+                      <RefreshCw size={14} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label="New remote folder"
+                      disabled={!profile || readonly}
+                      onClick={() => action(true, "mkdir")}
+                    >
+                      <FolderPlus size={14} />
+                    </Button>
+                    <Dropdown.Root>
+                      <Dropdown.Trigger asChild>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          disabled={!profile || readonly}
+                          aria-label="Remote pane actions"
+                        >
+                          <MoreHorizontal size={16} />
+                        </Button>
+                      </Dropdown.Trigger>
+                      <Dropdown.Portal>
+                        <Dropdown.Content className="dropdown">
+                          <Dropdown.Item
+                            onSelect={() =>
+                              void run(() => upload(undefined, true))
+                            }
+                          >
+                            Upload folder recursively…
+                          </Dropdown.Item>
+                        </Dropdown.Content>
+                      </Dropdown.Portal>
+                    </Dropdown.Root>
+                  </div>
+                </div>
+                <PathBar
+                  path={remote.path}
+                  label="Remote prefix"
+                  back={remote.back}
+                  forward={remote.forward}
+                  canBack={remote.canBack}
+                  canForward={remote.canForward}
+                  up={() => {
+                    remote.go(parent(remote.path, true));
+                    setRemoteSelection([]);
+                  }}
+                  navigate={(path) => {
+                    remote.go(path && !path.endsWith("/") ? `${path}/` : path);
+                    setRemoteSelection([]);
+                  }}
+                  disabled={!profile}
+                  bucket={profile?.bucket}
+                />
+                <Files
+                  remote
+                  canTransfer={desktop && !!profile}
+                  dropPath={
+                    drag.target?.side === "remote"
+                      ? drag.target.path
+                      : undefined
+                  }
+                  filter={search}
+                  showFilter={false}
+                  entries={entries}
+                  selected={remoteSelection}
+                  onSelect={setRemoteSelection}
+                  onOpen={(entry) => {
+                    if (entry.is_dir) {
+                      remote.go(entry.path);
+                      setRemoteSelection([]);
+                    } else void run(() => showProperties(entry, true));
+                  }}
+                  loading={remoteFiles.isFetching && !entries.length}
+                  error={
+                    remoteFiles.error ? message(remoteFiles.error) : undefined
+                  }
+                  connected={!!profile}
+                  writable={!readonly}
+                  onAction={(name, entry) => action(true, name, entry)}
+                  onRetry={() => void remoteFiles.refetch()}
+                />
+                {remoteFiles.hasNextPage && (
+                  <Button
+                    className="load-more"
+                    disabled={remoteFiles.isFetchingNextPage}
+                    onClick={() => void remoteFiles.fetchNextPage()}
+                  >
+                    {remoteFiles.isFetchingNextPage
+                      ? "Loading…"
+                      : "Load next 1,000 objects"}
+                  </Button>
+                )}
+              </section>
+            )}
+          </div>
+          <Queue
+            jobs={jobs}
+            bulkControl={bulkControl}
+            bulkBusy={bulkBusy}
+            open={mainView === "transfers" || preferences.queueOpen}
+            toggle={() => {
+              if (mainView === "transfers") {
+                showView("files");
+                preferences.set({ queueOpen: false });
+              } else preferences.set({ queueOpen: !preferences.queueOpen });
+            }}
+            control={(id, operation) =>
+              void run(async () => {
+                await api("transfer_control", { id, operation });
+                await query.invalidateQueries({ queryKey: ["transfers"] });
+              })
+            }
+            clear={() =>
+              void run(async () => {
+                await api("clear_finished");
+                await refresh();
+              })
+            }
+          />
+        </main>
+      </div>
+      <footer className="statusbar">
+        <span>
+          {profile ? (
+            <>
+              <span className={`tiny-dot ${connected ? "online" : ""}`} />
+              {profile.bucket}
+            </>
+          ) : (
+            <>
+              <Unplug size={11} /> Disconnected
+            </>
+          )}
+        </span>
+        <span>
+          {active ? `${active} active transfers` : "No active transfers"}
+          <span className="status-separator">/</span>
+          {bytes(jobs.reduce((s, j) => s + j.bytes_done, 0))} confirmed
+          <span className="status-separator">/</span>
+          <LockKeyhole size={10} /> Credentials in OS keychain
+        </span>
+      </footer>
+      {drag.dragging && (
+        <div
+          ref={drag.ghost}
+          className="file-drag-ghost"
+          style={{
+            transform: `translate3d(${drag.dragging.x + 14}px,${drag.dragging.y + 14}px,0)`,
+          }}
+        >
+          {drag.dragging.side === "local" ? (
+            <ArrowUpFromLine size={15} />
+          ) : (
+            <ArrowDownToLine size={15} />
+          )}
+          {drag.dragging.paths.length} item(s)
+          <small>
+            Drop on the {drag.dragging.side === "local" ? "remote" : "local"}{" "}
+            pane or a folder
+          </small>
+        </div>
+      )}
+      {bookmarksOpen && (
+        <Modal
+          title="Bookmarks"
+          description="Saved local folders paired with remote prefixes."
+          onClose={() => setBookmarksOpen(false)}
+        >
+          <div className="form">
+            <Button disabled={!profile || !local.path} onClick={bookmarkPair}>
+              <Bookmark size={15} /> Bookmark current pair
+            </Button>
+            {!preferences.bookmarks.length && (
+              <p className="muted">
+                No bookmarks yet. Connect a bucket and choose a local folder to
+                save a pair.
+              </p>
+            )}
+            {preferences.bookmarks.map((bookmark, index) => (
+              <div
+                className="bookmark-row"
+                key={`${bookmark.profile}-${index}`}
+              >
+                <button
+                  onClick={() => {
+                    const saved = profiles.data?.find(
+                      (p) => p.id === bookmark.profile,
+                    );
+                    if (saved) {
+                      connect(saved, bookmark.prefix);
+                      local.go(bookmark.local);
+                      showView("files");
+                      setBookmarksOpen(false);
+                    } else
+                      setError(
+                        "The connection for this bookmark no longer exists.",
+                      );
+                  }}
+                >
+                  <Bookmark size={15} />
+                  <span>
+                    {bookmark.label}
+                    <small>{bookmark.local}</small>
+                  </span>
+                </button>
                 <Button
                   variant="ghost"
-                  size="small"
-                  disabled={!desktop}
+                  size="icon"
+                  aria-label={`Remove bookmark ${bookmark.label}`}
                   onClick={() =>
-                    void run(async () => {
-                      const path = await openDialog({
-                        directory: true,
-                        title: "Open local folder",
-                      });
-                      if (typeof path === "string") {
-                        local.go(path);
-                        setLocalSelection([]);
-                      }
+                    preferences.set({
+                      bookmarks: preferences.bookmarks.filter(
+                        (_, i) => i !== index,
+                      ),
                     })
                   }
                 >
-                  <FolderOpen size={14} /> Browse
+                  <X size={14} />
                 </Button>
               </div>
-              <PathBar
-                path={local.path}
-                label="Local directory"
-                back={local.back}
-                forward={local.forward}
-                canBack={local.canBack}
-                canForward={local.canForward}
-                up={() => {
-                  local.go(parent(local.path));
-                  setLocalSelection([]);
-                }}
-                navigate={(path) => {
-                  local.go(path);
-                  setLocalSelection([]);
-                }}
-                disabled={!desktop}
-              />
-              <Files
-                entries={localFiles.data ?? []}
-                selected={localSelection}
-                onSelect={setLocalSelection}
-                onOpen={(entry) => {
-                  if (entry.is_dir) {
-                    local.go(entry.path);
-                    setLocalSelection([]);
-                  } else void run(() => showProperties(entry, false));
-                }}
-                loading={localFiles.isFetching}
-                error={localFiles.error ? message(localFiles.error) : undefined}
-                connected={desktop}
-                onAction={(name, entry) => action(false, name, entry)}
-                onRetry={() => void localFiles.refetch()}
-              />
-              <div className="pane-action">
-                <span className="muted">
-                  {localSelection.length
-                    ? `${localSelection.length} item(s) ready`
-                    : "Select files or drop them into remote"}
-                </span>
-                <Button
-                  disabled={!profile || readonly || !localSelection.length}
-                  onClick={() => void run(() => upload(localSelection))}
-                >
-                  <ArrowUpFromLine size={14} /> Upload selection
-                </Button>
-              </div>
-            </section>
-          )}
-          {preferences.view !== "local" && (
-            <section
-              className="pane remote-pane"
-              onDragOver={(e) => {
-                if (e.dataTransfer.types.includes("application/x-voids3-local"))
-                  e.preventDefault();
-              }}
-              onDrop={(e) => {
-                const value = e.dataTransfer.getData(
-                  "application/x-voids3-local",
-                );
-                if (value && !readonly) {
-                  e.preventDefault();
-                  void run(() => upload(JSON.parse(value) as string[]));
-                }
+            ))}
+          </div>
+        </Modal>
+      )}
+      {activityOpen && (
+        <Modal
+          title="Activity"
+          description="Current connection and transfer status."
+          onClose={() => setActivityOpen(false)}
+        >
+          <div className="form">
+            {currentError && <p className="error-box">{currentError}</p>}
+            {notice && <p className="notice">{notice}</p>}
+            {jobs
+              .filter((job) => job.status === "failed")
+              .map((job) => (
+                <p className="error-box" key={job.id}>
+                  {job.key}: {job.error || "Transfer failed"}
+                </p>
+              ))}
+            {!currentError &&
+              !notice &&
+              !jobs.some((job) => job.status === "failed") && (
+                <p className="muted">No current alerts.</p>
+              )}
+            <Button
+              onClick={() => {
+                showView("transfers");
+                setActivityOpen(false);
               }}
             >
-              <div className="pane-heading">
-                <span>
-                  <Cloud size={16} /> Remote storage
-                  {profile && (
-                    <span className="provider-tag">
-                      {profile.provider.toUpperCase()}
-                    </span>
-                  )}
-                </span>
-                <div className="split-button">
-                  <Button
-                    size="small"
-                    variant="default"
-                    disabled={!desktop || readonly}
-                    onClick={() => void run(() => upload())}
-                  >
-                    <Plus size={14} /> Upload files
-                  </Button>
-                  <Dropdown.Root>
-                    <Dropdown.Trigger asChild>
-                      <Button
-                        size="small"
-                        variant="default"
-                        disabled={!profile || readonly}
-                        aria-label="More upload options"
-                      >
-                        <ChevronDown size={13} />
-                      </Button>
-                    </Dropdown.Trigger>
-                    <Dropdown.Portal>
-                      <Dropdown.Content className="dropdown">
-                        <Dropdown.Item
-                          onSelect={() =>
-                            void run(() => upload(undefined, true))
-                          }
-                        >
-                          Upload folder recursively…
-                        </Dropdown.Item>
-                      </Dropdown.Content>
-                    </Dropdown.Portal>
-                  </Dropdown.Root>
-                </div>
-              </div>
-              <PathBar
-                path={remote.path}
-                label="Remote prefix"
-                back={remote.back}
-                forward={remote.forward}
-                canBack={remote.canBack}
-                canForward={remote.canForward}
-                up={() => {
-                  remote.go(parent(remote.path, true));
-                  setRemoteSelection([]);
-                }}
-                navigate={(path) => {
-                  remote.go(path && !path.endsWith("/") ? `${path}/` : path);
-                  setRemoteSelection([]);
-                }}
-                disabled={!profile}
-                bucket={profile?.bucket}
-              />
-              <Files
-                remote
-                entries={entries}
-                selected={remoteSelection}
-                onSelect={setRemoteSelection}
-                onOpen={(entry) => {
-                  if (entry.is_dir) {
-                    remote.go(entry.path);
-                    setRemoteSelection([]);
-                  } else void run(() => showProperties(entry, true));
-                }}
-                loading={remoteFiles.isFetching && !entries.length}
-                error={
-                  remoteFiles.error ? message(remoteFiles.error) : undefined
-                }
-                connected={!!profile}
-                writable={!readonly}
-                onAction={(name, entry) => action(true, name, entry)}
-                onRetry={() => void remoteFiles.refetch()}
-              />
-              {remoteFiles.hasNextPage && (
-                <Button
-                  className="load-more"
-                  disabled={remoteFiles.isFetchingNextPage}
-                  onClick={() => void remoteFiles.fetchNextPage()}
-                >
-                  {remoteFiles.isFetchingNextPage
-                    ? "Loading…"
-                    : "Load next 1,000 objects"}
-                </Button>
-              )}
-              <div className="pane-action">
-                <span className="muted">
-                  {readonly
-                    ? "Read-only connection"
-                    : "Existing objects are never overwritten"}
-                </span>
-                <Button
-                  disabled={!profile || !remoteSelection.length}
-                  onClick={() => void run(() => download())}
-                >
-                  <ArrowDownToLine size={14} /> Download
-                </Button>
-              </div>
-            </section>
-          )}
-        </div>
-        <Queue
-          jobs={jobs}
-          open={preferences.queueOpen}
-          toggle={() => preferences.set({ queueOpen: !preferences.queueOpen })}
-          control={(id, operation) =>
-            void run(async () => {
-              await api("transfer_control", { id, operation });
-              await query.invalidateQueries({ queryKey: ["transfers"] });
-            })
-          }
-          clear={() =>
-            void run(async () => {
-              await api("clear_finished");
-              await refresh();
-            })
-          }
-        />
-        <footer className="statusbar">
-          <span>
-            {profile ? (
-              <>
-                <span className="tiny-dot online" />
-                {profile.bucket}
-              </>
-            ) : (
-              <>
-                <Unplug size={11} /> Disconnected
-              </>
-            )}
-          </span>
-          <span>
-            {active ? `${active} active transfers` : "No active transfers"}
-            <span className="status-separator">/</span>
-            {bytes(jobs.reduce((s, j) => s + j.bytes_done, 0))} confirmed
-            <span className="status-separator">/</span>
-            <LockKeyhole size={10} /> Credentials in OS keychain
-          </span>
-        </footer>
-      </main>
+              Open transfer queue
+            </Button>
+          </div>
+        </Modal>
+      )}
       {connectionForm && (
         <ConnectionDialog
           initial={connectionForm === "new" ? undefined : connectionForm}
@@ -1136,8 +1427,7 @@ function ActionPrompt({
           void prompt
             .execute(value)
             .then(() => {
-              if (!prompt.content) onClose();
-              else if (prompt.label === "Done") onClose();
+              if (!prompt.keepOpen) onClose();
             })
             .catch((e: unknown) => setError(message(e)))
             .finally(() => setBusy(false));

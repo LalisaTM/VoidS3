@@ -6,7 +6,7 @@ A native S3 desktop client built with Rust, Tauri 2, and React 19. Cloudflare R2
 
 ## Completely vibecoded, for fun
 
-**This project is completely vibecoded for fun. No human has read, reviewed, modified, edited, or otherwise manually intervened in any of this code.** AI agents handle the implementation, commits, pushing, branching, CI configuration, tests, versioning, and release setup. Humans supplied the idea and specification and started the experiment.
+**This project is completely vibecoded for fun. No human has read, reviewed, modified, edited, or otherwise manually intervened in any of this code.** AI agents handle the implementation, commits, pushing, branching, CI configuration, tests, versioning, and release setup. Humans supplied the idea, specification, and visual design references and started the experiment.
 
 Automated checks are not human review or a security audit. This is an experimental **0.1.1** release, not a claim of production readiness. Use disposable credentials and test buckets first. The original specification is in [docs/brief.md](docs/brief.md); it describes the intended product, including features that are still unfinished.
 
@@ -15,14 +15,21 @@ Automated checks are not human review or a security audit. This is an experiment
 - Native dual-pane desktop file browser, paginated S3 listings, virtualized rows, filtering, sorting, multi-selection, navigation history, bookmarks, and dark/light themes.
 - Named bucket connections for R2, AWS, B2, Wasabi, MinIO, Spaces, and custom endpoints. R2 region `auto`, EU/FedRAMP endpoint helpers, and explicit buckets without `ListBuckets` permissions.
 - OS keychain credentials; non-secret profiles, settings, and transfer history in SQLite. Profile exports exclude credentials.
-- Rust streaming uploads/downloads, concurrent files and multipart parts, globally bounded transfer requests, SDK retries, persistent multipart state, pause/resume/cancel, provider part reconciliation, and source-change checks.
+- Rust streaming uploads/downloads, concurrent files and multipart parts, globally bounded transfer requests, SDK retries, persistent multipart state, per-file and global pause/resume/cancel, provider part reconciliation, and source-change checks.
 - Downloads use ETag-conditional requests, partial files, ranged resume, size verification, and atomic no-clobber finalization on filesystems supporting hard links. ETags are identity tokens, never assumed to be MD5.
-- Recursive uploads, local folder creation/rename/recycling, remote folder markers, object properties, server-side copy, conditional object deletion, signed download URLs, and bounded UTF-8 text previews.
+- Drag files and folders between panes or drop them from Explorer onto the remote pane or a remote folder. Recursive uploads and folder downloads preserve subdirectories.
+- Local folder creation/rename/recycling, remote folder markers, object properties, server-side copy, confirmed multi-file deletion with partial-failure reporting, signed download URLs, and bounded UTF-8 text previews.
 - One-way and bidirectional **additions-only** synchronization with preview; existing pairs are preserved as conflicts.
 - A CLI using the same provider and transfer engine, independent of the GUI.
 - CI for formatting, linting, tests, dependency auditing, live local S3 integration, desktop builds, and version consistency; tagged Windows installer/CLI releases.
 
 Uploads do not overwrite existing objects. Downloads do not overwrite local files. Copy checks destination absence, but S3 copy cannot atomically guarantee it remains absent; avoid concurrent writes to the copy destination. Provider support for conditional operations varies; unsupported requests fail visibly.
+
+## Transfer and file controls
+
+- **Pause all**, **Resume all**, and **Cancel all** stay in the transfer queue header, even when collapsed. They apply across every connection and queue filter. Resume all resumes paused transfers; failed transfers have an individual Retry action. Cancel all asks for confirmation, preserves completed files, and attempts multipart/partial-file cleanup. In-flight provider requests can finish before stopping. Cleanup failures remain visible and can be retried with Cancel.
+- Drag a file, folder, or selected group onto the opposite pane to transfer it. Drop onto a folder row to use that folder as the destination. Press Escape to cancel a drag. Explorer drops onto the remote pane ask for confirmation. Remote-to-Explorer dragging is unfinished.
+- Select items and use **Delete**, the Delete key, or the context menu. Local items go to the OS recycle bin. Remote files use their listed ETags for conditional deletion and require a writable connection. Missing ETags and provider failures are reported; failed items stay selected. Recursive deletion of remote folder prefixes is not available.
 
 ## Install
 

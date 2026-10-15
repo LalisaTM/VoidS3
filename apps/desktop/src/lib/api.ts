@@ -29,6 +29,7 @@ export interface FileEntry {
   size: number;
   modified: number | null;
   etag: string | null;
+  storage_class?: string | null;
 }
 export interface Page {
   entries: FileEntry[];
@@ -54,6 +55,17 @@ export interface TransferSettings {
   part_size: number;
   multipart_threshold: number;
   retries: number;
+}
+export type BatchOperation = "pause" | "resume" | "cancel";
+export interface BatchControlResult {
+  requested: number;
+  failed: number;
+  errors: string[];
+}
+export interface DeleteResult {
+  deleted: string[];
+  failed: number;
+  errors: string[];
 }
 export interface Change {
   key: string;

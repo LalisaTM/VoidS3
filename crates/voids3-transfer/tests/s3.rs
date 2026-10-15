@@ -176,6 +176,53 @@ async fn exercise(s3: &S3, prefix: &str) -> Result<(), Box<dyn std::error::Error
     tokio::fs::write(&large, &content).await?;
     let small_key = format!("{prefix}small.txt");
     let large_key = format!("{prefix}large.bin");
+    // Resume queues workers synchronously. On this current-thread runtime, a
+    // global stop must reach every worker before any of them obtains a permit.
+    let stop_store = Arc::new(Store::open(&dir.path().join("global-stop.db"))?);
+    let mut stopping = Vec::new();
+    for index in 0..5 {
+        let mut queued = job(s3, small.clone(), format!("{prefix}stopped-{index}.txt"), 0);
+        queued.status = Status::Paused;
+        queued.source = Some(Fingerprint::read(&small).await?);
+        stop_store.put("transfers", &queued.id, &queued)?;
+        stopping.push(queued);
+    }
+    let stopped_engine = Engine::new(stop_store.clone(), settings())?;
+    for queued in &stopping {
+        stopped_engine.resume(s3.clone(), &queued.id)?;
+    }
+    assert_eq!(stopped_engine.interrupt_all(false)?.len(), stopping.len());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if stopped_engine
+                .list()
+                .unwrap()
+                .iter()
+                .all(|j| j.status == Status::Paused)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    for queued in &stopping {
+        stopped_engine.resume(s3.clone(), &queued.id)?;
+    }
+    assert_eq!(stopped_engine.interrupt_all(true)?.len(), stopping.len());
+    for queued in &stopping {
+        assert_eq!(
+            wait(&stopped_engine, &queued.id).await.status,
+            Status::Cancelled
+        );
+        assert!(s3.head(&queued.key).await.is_err());
+    }
+    assert!(
+        stop_store
+            .list::<Transfer>("transfers")?
+            .iter()
+            .all(|j| j.status == Status::Cancelled)
+    );
     let one = engine
         .enqueue(
             s3.clone(),

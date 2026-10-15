@@ -1,4 +1,10 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -13,15 +19,12 @@ vi.mock("../lib/api", async (original) => ({
   api: vi.fn(),
 }));
 const mockApi = vi.mocked(api);
-function wrap(ui: React.ReactNode) {
+function wrap(
+  ui: React.ReactNode,
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+) {
   return render(
-    <QueryClientProvider
-      client={
-        new QueryClient({ defaultOptions: { queries: { retry: false } } })
-      }
-    >
-      {ui}
-    </QueryClientProvider>,
+    <QueryClientProvider client={client}>{ui}</QueryClientProvider>,
   );
 }
 beforeEach(() => {
@@ -78,6 +81,105 @@ describe("desktop shell", () => {
     await user.click(queue);
     expect(queue).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("No transfers queued")).toBeInTheDocument();
+  });
+  it("opens real transfer, bookmark, and activity views from the Figma navigation", async () => {
+    wrap(<App />);
+    const user = userEvent.setup();
+    const nav = within(
+      screen.getByRole("navigation", { name: "Main navigation" }),
+    );
+    await user.click(nav.getByRole("button", { name: "Transfers" }));
+    expect(
+      screen.queryByRole("listbox", { name: "Local files" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Filter transfers" }),
+    ).toBeInTheDocument();
+    await user.click(nav.getByRole("button", { name: "Files" }));
+    expect(
+      screen.getByRole("listbox", { name: "Local files" }),
+    ).toBeInTheDocument();
+    await user.click(nav.getByRole("button", { name: "Bookmarks" }));
+    expect(screen.getByRole("dialog", { name: "Bookmarks" })).toHaveTextContent(
+      "No bookmarks yet",
+    );
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Activity" }));
+    expect(screen.getByRole("dialog", { name: "Activity" })).toHaveTextContent(
+      "No current alerts",
+    );
+  });
+  it("focuses search and restores focus when its filter is dismissed", async () => {
+    wrap(<App />);
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("button", { name: "Search loaded files" }),
+    );
+    const search = screen.getByRole("textbox", { name: "Filter loaded files" });
+    expect(search).toHaveFocus();
+    await user.type(search, "archive");
+    await user.keyboard("{Escape}");
+    expect(
+      screen.queryByRole("textbox", { name: "Filter loaded files" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Search loaded files" }),
+    ).toHaveFocus();
+  });
+  it("opens a saved pair with one remote navigation step", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    client.setQueryData(
+      ["profiles"],
+      [
+        {
+          id: "test-profile",
+          name: "Test connection",
+          provider: "r2",
+          bucket: "assets",
+          prefix: "",
+          region: "auto",
+          endpoint: "https://example.com",
+          read_only: false,
+          path_style: true,
+          allow_http: false,
+        },
+      ],
+    );
+    client.setQueryData(["home"], "C:/base");
+    usePreferences.setState({
+      bookmarks: [
+        {
+          label: "assets/releases",
+          profile: "test-profile",
+          prefix: "releases/",
+          local: "C:/exports",
+        },
+      ],
+    });
+    wrap(<App />, client);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Bookmarks" }));
+    await user.click(screen.getByRole("button", { name: /^assets\/releases/ }));
+    expect(
+      screen.queryByRole("dialog", { name: "Bookmarks" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Edit Remote prefix" }),
+    ).toHaveTextContent("releases/");
+    expect(
+      screen.getByRole("button", { name: "Edit Local directory" }),
+    ).toHaveTextContent("C:/exports");
+  });
+  it("resizes the split panes with the keyboard", () => {
+    wrap(<App />);
+    const handle = screen.getByRole("separator", { name: "Resize file panes" });
+    Object.defineProperty(handle.parentElement, "clientWidth", { value: 1000 });
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(handle).toHaveAttribute("aria-valuenow", "55");
+    fireEvent.keyDown(handle, { key: "Home" });
+    expect(handle).toHaveAttribute("aria-valuenow", "30");
   });
 });
 describe("connection form", () => {
