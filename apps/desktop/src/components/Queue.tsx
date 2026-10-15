@@ -30,9 +30,15 @@ export function Queue({
   const [samples, setSamples] = useState<{ time: number; value: number }[]>([]);
   const total = jobs.reduce((sum, j) => sum + j.bytes_done, 0);
   useEffect(() => {
-    const time = Date.now();
-    setSamples((old) => [...old.slice(-59), { time, value: total }]);
-  }, [jobs, total]);
+    const sample = () =>
+      setSamples((old) => [
+        ...old.slice(-59),
+        { time: Date.now(), value: total },
+      ]);
+    sample();
+    const interval = window.setInterval(sample, 1000);
+    return () => window.clearInterval(interval);
+  }, [total]);
   const last = samples.at(-1);
   const first = samples.at(-2);
   const rate =
@@ -225,7 +231,8 @@ export function Queue({
                         )}
                       </Button>
                     )}
-                    {!["completed", "cancelled"].includes(job.status) && (
+                    {(!["completed", "cancelled"].includes(job.status) ||
+                      (job.status === "cancelled" && !!job.upload_id)) && (
                       <Button
                         size="icon"
                         variant="ghost"

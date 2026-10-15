@@ -1268,6 +1268,9 @@ progress::-webkit-progress-value {
 .dropdown > [data-highlighted] {
   background: var(--hover);
 }
+.dropdown > [data-disabled] {
+  opacity: 0.35;
+}
 .dropdown > .destructive {
   color: var(--danger);
 }

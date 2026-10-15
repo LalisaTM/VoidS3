@@ -18,7 +18,7 @@ voids3-s3 = { path = "crates/voids3-s3" }
 voids3-transfer = { path = "crates/voids3-transfer" }
 voids3-sync = { path = "crates/voids3-sync" }
 anyhow = "1"
-aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "default-https-client", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 serde = { version = "1", features = ["derive"] }

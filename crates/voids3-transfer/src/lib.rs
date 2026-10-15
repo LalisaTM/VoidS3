@@ -192,9 +192,10 @@ impl Engine {
         let local = if direction == Direction::Upload {
             tokio::fs::canonicalize(local).await?
         } else {
-            let parent = local.parent().ok_or_else(|| {
-                Error::Invalid("Download destination requires a parent directory".into())
-            })?;
+            let parent = local
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
             let name = local
                 .file_name()
                 .ok_or_else(|| Error::Invalid("Download destination requires a filename".into()))?;
@@ -280,13 +281,19 @@ impl Engine {
                             .send()
                             .await
                         {
-                            job.error = Some(
-                                api_error(
-                                    "Cancelled, but multipart cleanup failed",
-                                    e.as_service_error().and_then(|s| s.meta().code()),
-                                )
-                                .to_string(),
-                            );
+                            if e.as_service_error()
+                                .is_some_and(|s| s.meta().code() == Some("NoSuchUpload"))
+                            {
+                                job.upload_id = None;
+                            } else {
+                                job.error = Some(
+                                    api_error(
+                                        "Cancelled, but multipart cleanup failed",
+                                        e.as_service_error().and_then(|s| s.meta().code()),
+                                    )
+                                    .to_string(),
+                                );
+                            }
                         } else {
                             job.upload_id = None;
                         }
@@ -345,7 +352,9 @@ impl Engine {
             }
         }
         let mut job = self.get(id)?;
-        if job.status.terminal() {
+        if job.status == Status::Completed
+            || (job.status == Status::Cancelled && job.upload_id.is_none())
+        {
             return Ok(());
         }
         job.status = Status::Queued;

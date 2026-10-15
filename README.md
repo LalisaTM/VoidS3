@@ -1,5 +1,7 @@
 # VoidS3
 
+[![CI](https://github.com/LalisaTM/VoidS3/actions/workflows/ci.yml/badge.svg)](https://github.com/LalisaTM/VoidS3/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/LalisaTM/VoidS3?include_prereleases)](https://github.com/LalisaTM/VoidS3/releases) [![License: MIT](https://img.shields.io/badge/License-MIT-c7f9a6)](LICENSE)
+
 A native S3 desktop client built with Rust, Tauri 2, and React 19. Cloudflare R2 first, with configurable S3-compatible endpoints. Windows is the primary target.
 
 ## Completely vibecoded, for fun

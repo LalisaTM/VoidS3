@@ -388,9 +388,11 @@ export default function App() {
         <div className="workspace-label">
           YOUR WORKSPACE <LockKeyhole size={11} />
         </div>
-        <button className="sidebar-link selected">
+        <button
+          className="sidebar-link selected"
+          onClick={() => preferences.set({ view: "dual" })}
+        >
           <LayoutPanelLeft size={17} /> File explorer
-          <span className="shortcut">⌘ 1</span>
         </button>
         <button
           className="sidebar-link"
@@ -884,6 +886,7 @@ export default function App() {
                   remoteFiles.error ? message(remoteFiles.error) : undefined
                 }
                 connected={!!profile}
+                writable={!readonly}
                 onAction={(name, entry) => action(true, name, entry)}
                 onRetry={() => void remoteFiles.refetch()}
               />

@@ -12,7 +12,7 @@ Pause cancels in-flight request futures. Multipart parts already accepted by S3 
 
 Downloads inspect ETag/size, stream to a transfer-specific partial in the destination directory, and resume from that file's actual length using `Range` and `If-Match`. The server must honor the requested range; otherwise the operation fails without appending a full response. Final length must equal the original expected length. Flush/sync completes before a same-directory no-clobber hard link creates the destination. Filesystems without hard-link support fail visibly and preserve the partial. Cancellation deletes partials when possible. ETag identifies the remote version for conditional access; it is not interpreted as a content checksum.
 
-Crash windows remain: the provider can accept a final upload before local completion state is committed. A subsequent retry can report a conflict or `NoSuchUpload`; verify the remote object, then cancel the stale queue entry. Automatic resolution of ambiguous completion, checksum verification, automatic retry of an interrupted download body, parallel ranged downloads, bandwidth shaping, and cross-process queue leases remain unfinished.
+Crash windows remain: the provider can accept a final upload before local completion state is committed. A subsequent retry can report a conflict or `NoSuchUpload`; verify the remote object, then cancel the stale queue entry. Automatic resolution of ambiguous completion, checksum verification, automatic retry of an interrupted download body, parallel ranged downloads, and bandwidth shaping remain unfinished. An OS file lock prevents concurrent instances from operating the shared queue; distributed scheduling is not supported.
 
 ## Integration tests
 

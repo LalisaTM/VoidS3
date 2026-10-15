@@ -26,6 +26,7 @@ export function Files({
   error,
   remote,
   connected,
+  writable = true,
   onAction,
   onRetry,
 }: {
@@ -37,12 +38,14 @@ export function Files({
   error?: string;
   remote?: boolean;
   connected: boolean;
+  writable?: boolean;
   onAction: (action: string, entry?: FileEntry) => void;
   onRetry: () => void;
 }) {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"name" | "size" | "modified">("name");
   const [descending, setDescending] = useState(false);
+  const [menu, setMenu] = useState<string | null>(null);
   const anchor = useRef(0);
   const container = useRef<HTMLDivElement>(null);
   const filtered = useMemo(
@@ -113,7 +116,7 @@ export function Files({
           aria-label={remote ? "New remote folder" : "New local folder"}
           size="icon"
           variant="ghost"
-          disabled={!connected}
+          disabled={!connected || !writable}
           onClick={() => onAction("mkdir")}
         >
           <FolderPlus size={15} />
@@ -139,6 +142,42 @@ export function Files({
         aria-multiselectable="true"
         tabIndex={0}
         onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (
+            filtered.length &&
+            ["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)
+          ) {
+            e.preventDefault();
+            const current = filtered.findIndex(
+              (entry) => entry.path === selected.at(-1),
+            );
+            const index =
+              e.key === "Home"
+                ? 0
+                : e.key === "End"
+                  ? filtered.length - 1
+                  : Math.max(
+                      0,
+                      Math.min(
+                        filtered.length - 1,
+                        current + (e.key === "ArrowDown" ? 1 : -1),
+                      ),
+                    );
+            if (e.shiftKey)
+              onSelect(
+                filtered
+                  .slice(
+                    Math.min(anchor.current, index),
+                    Math.max(anchor.current, index) + 1,
+                  )
+                  .map((entry) => entry.path),
+              );
+            else {
+              onSelect([filtered[index].path]);
+              anchor.current = index;
+            }
+            virtual.scrollToIndex(index);
+          }
           if ((e.ctrlKey || e.metaKey) && e.key === "a") {
             e.preventDefault();
             onSelect(filtered.map((f) => f.path));
@@ -220,11 +259,7 @@ export function Files({
                   onContextMenu={(e) => {
                     e.preventDefault();
                     onSelect([entry.path]);
-                    e.currentTarget
-                      .querySelector<HTMLButtonElement>(
-                        'button[aria-haspopup="menu"]',
-                      )
-                      ?.click();
+                    setMenu(entry.path);
                   }}
                   draggable
                   onDragStart={(e) => {
@@ -264,7 +299,10 @@ export function Files({
                         )
                       : "—"}
                   </span>
-                  <Dropdown.Root>
+                  <Dropdown.Root
+                    open={menu === entry.path}
+                    onOpenChange={(open) => setMenu(open ? entry.path : null)}
+                  >
                     <Dropdown.Trigger asChild>
                       <Button
                         size="icon"
@@ -310,6 +348,7 @@ export function Files({
                               Copy signed download URL
                             </Dropdown.Item>
                             <Dropdown.Item
+                              disabled={!writable}
                               onSelect={() => onAction("copy", entry)}
                             >
                               Copy object…
@@ -326,6 +365,7 @@ export function Files({
                         {(!entry.is_dir || !remote) && (
                           <Dropdown.Item
                             className="destructive"
+                            disabled={!writable}
                             onSelect={() => onAction("delete", entry)}
                           >
                             {remote ? "Delete object…" : "Move to recycle bin…"}

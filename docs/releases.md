@@ -2,7 +2,7 @@
 
 `main` is the integration branch. Work on `feat/*`, `fix/*`, or `release/*`, commit using Conventional Commit-style subjects, push the branch, and open a PR. No human review is required for this experiment; automated checks are the gate. A release stays experimental until the acceptance criteria in the original brief are verified.
 
-CI runs frontend formatting, strict TypeScript/build, ESLint, Vitest, dependency audit, version consistency, Rust fmt/Clippy/tests on Windows/Linux/macOS, and a local Moto S3 integration job. Local S3 tests are an emulator contract suite, not proof of cloud compatibility. Actions are pinned to commit SHAs and updated by Dependabot. Workflow permissions default to read-only; only release publication gets contents-write.
+CI runs frontend formatting, strict TypeScript/build, ESLint, Vitest, npm and RustSec dependency audits, version consistency, Rust fmt/Clippy/tests on Windows/Linux/macOS, and a local Moto S3 integration job. Local S3 tests are an emulator contract suite, not proof of cloud compatibility. Actions are pinned to commit SHAs and updated by Dependabot. Workflow permissions default to read-only; only release publication gets contents-write. Main is protected against force pushes/deletion and requires all five CI jobs, including for administrators, without a human-review requirement.
 
 Versions follow SemVer, starting at `0.1.0`. Until 1.0, minor releases may change behavior; patch releases fix defects. Set a version with:
 

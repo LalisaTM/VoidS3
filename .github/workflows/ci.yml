@@ -54,6 +54,11 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - if: runner.os == 'Linux'
+        name: Audit Rust dependencies
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit
   s3-integration:
     runs-on: ubuntu-latest
     services:
