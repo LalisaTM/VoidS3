@@ -1,5 +1,8 @@
 //! Persistent transfer engine shared by desktop and CLI. Files never cross IPC.
+pub mod batch;
+mod conflict;
 pub mod upload;
+pub mod view;
 use aws_sdk_s3::{
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart},
@@ -39,10 +42,12 @@ pub enum Status {
     Completed,
     Failed,
     Cancelled,
+    Conflict,
+    Skipped,
 }
 impl Status {
     pub fn terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Cancelled)
+        matches!(self, Self::Completed | Self::Cancelled | Self::Skipped)
     }
     fn active(self) -> bool {
         matches!(
@@ -57,8 +62,14 @@ pub struct Fingerprint {
     pub modified_nanos: u128,
 }
 impl Fingerprint {
+    pub fn read_blocking(path: &Path) -> Result<Self> {
+        Self::from_metadata(std::fs::metadata(path)?)
+    }
     pub async fn read(path: &Path) -> Result<Self> {
         let meta = tokio::fs::metadata(path).await?;
+        Self::from_metadata(meta)
+    }
+    fn from_metadata(meta: std::fs::Metadata) -> Result<Self> {
         if !meta.is_file() {
             return Err(Error::Invalid(
                 "Transfer source must be a regular file".into(),
@@ -85,9 +96,11 @@ pub enum UploadCondition {
         etag: String,
     },
 }
+#[derive(Clone)]
 pub struct UploadIntent {
     pub source: Fingerprint,
     pub condition: UploadCondition,
+    pub batch_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transfer {
@@ -109,6 +122,10 @@ pub struct Transfer {
     pub remote_etag: Option<String>,
     #[serde(default)]
     pub upload_condition: UploadCondition,
+    #[serde(default)]
+    pub batch_id: Option<String>,
+    #[serde(default)]
+    pub conflict: Option<voids3_s3::ObjectInfo>,
     pub priority: i32,
     pub settings: TransferSettings,
 }
@@ -116,6 +133,7 @@ pub struct Transfer {
 struct Control {
     token: CancellationToken,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    epoch: Option<u64>,
 }
 
 pub struct Engine {
@@ -125,6 +143,8 @@ pub struct Engine {
     files: Arc<Semaphore>,
     requests: Arc<Semaphore>,
     maintenance: std::sync::atomic::AtomicBool,
+    feeds: Mutex<HashMap<String, batch::Feed>>,
+    stop_epoch: std::sync::atomic::AtomicU64,
 }
 /// Holds the queue idle while a desktop update is downloaded and installed.
 /// Dropping the guard after a failed update allows transfers again.
@@ -148,6 +168,7 @@ impl Engine {
             }
             jobs.insert(job.id.clone(), job);
         }
+        let feeds = batch::recover(&store)?;
         Ok(Arc::new(Self {
             store,
             jobs: Mutex::new(jobs),
@@ -155,6 +176,8 @@ impl Engine {
             files: Arc::new(Semaphore::new(settings.concurrent_files)),
             requests: Arc::new(Semaphore::new(settings.max_requests)),
             maintenance: std::sync::atomic::AtomicBool::new(false),
+            feeds: Mutex::new(feeds),
+            stop_epoch: std::sync::atomic::AtomicU64::new(0),
         }))
     }
     pub fn list(&self) -> Result<Vec<Transfer>> {
@@ -182,6 +205,18 @@ impl Engine {
             .get(id)
             .cloned()
             .ok_or_else(|| Error::Invalid("Transfer not found".into()))
+    }
+    async fn persist(&self, job: &Transfer) -> Result<()> {
+        let store = self.store.clone();
+        let snapshot = job.clone();
+        tokio::task::spawn_blocking(move || store.put("transfers", &snapshot.id, &snapshot))
+            .await
+            .map_err(lock)??;
+        self.jobs
+            .lock()
+            .map_err(lock)?
+            .insert(job.id.clone(), job.clone());
+        Ok(())
     }
     pub async fn enqueue(
         self: &Arc<Self>,
@@ -287,15 +322,21 @@ impl Engine {
             parts: BTreeMap::new(),
             source,
             remote_etag: etag,
+            batch_id: intent.as_ref().and_then(|intent| intent.batch_id.clone()),
+            conflict: None,
             upload_condition: intent.map(|intent| intent.condition).unwrap_or_default(),
             priority: 0,
             settings,
         };
-        self.start(s3, job)?;
+        let engine = self.clone();
+        tokio::task::spawn_blocking(move || engine.start(s3, job))
+            .await
+            .map_err(lock)??;
         Ok(id)
     }
     fn start(self: &Arc<Self>, s3: S3, job: Transfer) -> Result<()> {
         let control = Control {
+            epoch: None,
             token: CancellationToken::new(),
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -309,8 +350,17 @@ impl Engine {
         {
             return Err(Error::Conflict("Connection target changed since this transfer was queued. Restore its original endpoint, bucket, region, and addressing mode before resuming or cancelling.".into()));
         }
+        let worker_epoch;
         {
             let mut controls = self.controls.lock().map_err(lock)?;
+            if control.epoch.is_some_and(|epoch| {
+                epoch != self.stop_epoch.load(std::sync::atomic::Ordering::Acquire)
+            }) {
+                return Err(Error::Paused);
+            }
+            if control.epoch.is_some() && self.get(&job.id)?.status != Status::Conflict {
+                return Err(Error::Cancelled);
+            }
             if self.maintenance.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(Error::Conflict(
                     "An application update is in progress. Try the transfer again after updating."
@@ -320,7 +370,27 @@ impl Engine {
             if controls.contains_key(&job.id) {
                 return Err(Error::Invalid("Transfer is already running".into()));
             }
+            let is_new = !self.jobs.lock().map_err(lock)?.contains_key(&job.id);
+            if is_new && self.jobs.lock().map_err(lock)?.len() >= 100_000 {
+                return Err(Error::Invalid(
+                    "Queue limit is 100,000 files; clear finished history".into(),
+                ));
+            }
+            if is_new && job.batch_id.is_some() && controls.len() >= batch::BACKLOG {
+                return Err(Error::Paused);
+            }
+            if is_new
+                && let Some(id) = &job.batch_id
+                && let Some(feed) = self.feeds.lock().map_err(lock)?.get(id)
+            {
+                match *feed.state.borrow() {
+                    batch::FeedState::Paused => return Err(Error::Paused),
+                    batch::FeedState::Cancelled => return Err(Error::Cancelled),
+                    _ => {}
+                }
+            }
             self.save(&job)?;
+            worker_epoch = self.stop_epoch.load(std::sync::atomic::Ordering::Acquire);
             controls.insert(job.id.clone(), control.clone());
         }
         let engine = Arc::clone(self);
@@ -328,9 +398,25 @@ impl Engine {
             let mut job = job;
             let result = engine.run(&s3, &mut job, &control).await;
             if let Err(error) = result {
+                if let (Some(batch), Error::Provider(message)) = (&job.batch_id, &error)
+                    && [
+                        "NoSuchBucket",
+                        "InvalidAccessKeyId",
+                        "SignatureDoesNotMatch",
+                        "AccessDenied",
+                        "Forbidden",
+                        "ExpiredToken",
+                    ]
+                    .iter()
+                    .any(|code| message.contains(code))
+                {
+                    engine.fail_batch(batch, message);
+                }
                 let cancelled = control.cancel.load(std::sync::atomic::Ordering::Relaxed);
                 job.status = if cancelled {
                     Status::Cancelled
+                } else if job.conflict.is_some() {
+                    Status::Conflict
                 } else if matches!(error, Error::Paused) {
                     Status::Paused
                 } else {
@@ -378,14 +464,34 @@ impl Engine {
                 }
             }
             // Hold the control map until the final state is committed, preventing a resume race.
-            match engine.controls.lock() {
+            let policy_batch = if job.status == Status::Conflict
+                && job.upload_condition == UploadCondition::Create
+            {
+                job.batch_id.clone()
+            } else {
+                None
+            };
+            let transfer_id = job.id.clone();
+            let final_engine = engine.clone();
+            let _ = tokio::task::spawn_blocking(move || match final_engine.controls.lock() {
                 Ok(mut controls) => {
-                    if let Err(e) = engine.save(&job) {
+                    if let Err(e) = final_engine.save(&job) {
                         tracing::error!(transfer_id = %job.id, error = %e, "Cannot persist transfer outcome");
                     }
                     controls.remove(&job.id);
                 }
                 Err(_) => tracing::error!("Transfer control lock poisoned"),
+            }).await;
+            if let Some(batch) = policy_batch
+                && let Ok(Some(action)) = engine.batch_policy(Some(&batch))
+            {
+                let _ = engine.resolve_conflicts_at_epoch(
+                    s3,
+                    &transfer_id,
+                    action,
+                    false,
+                    worker_epoch,
+                );
             }
         });
         Ok(())
@@ -401,6 +507,12 @@ impl Engine {
     pub fn begin_maintenance(self: &Arc<Self>) -> Result<MaintenanceGuard> {
         let controls = self.controls.lock().map_err(lock)?;
         if !controls.is_empty()
+            || self
+                .feeds
+                .lock()
+                .map_err(lock)?
+                .values()
+                .any(|feed| *feed.state.borrow() == batch::FeedState::Running)
             || self
                 .jobs
                 .lock()
@@ -424,6 +536,21 @@ impl Engine {
     /// before any network or credential work can delay a global stop.
     pub fn interrupt_all(&self, cancel: bool) -> Result<Vec<String>> {
         let controls = self.controls.lock().map_err(lock)?;
+        self.stop_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        for feed in self.feeds.lock().map_err(lock)?.values() {
+            let current = *feed.state.borrow();
+            if matches!(
+                current,
+                batch::FeedState::Running | batch::FeedState::Paused
+            ) {
+                feed.state.send_replace(if cancel {
+                    batch::FeedState::Cancelled
+                } else {
+                    batch::FeedState::Paused
+                });
+            }
+        }
         for control in controls.values() {
             if cancel {
                 control
@@ -463,6 +590,31 @@ impl Engine {
         self.save(&job)?;
         Ok(true)
     }
+    pub fn cancel_idle(&self) -> Result<Vec<String>> {
+        let controls = self.controls.lock().map_err(lock)?;
+        let mut jobs = self.jobs.lock().map_err(lock)?;
+        let mut updates = Vec::new();
+        for job in jobs.values() {
+            if controls.contains_key(&job.id) || job.upload_id.is_some() || job.status.terminal() {
+                continue;
+            }
+            let mut job = job.clone();
+            if job.direction == Direction::Download
+                && let Err(error) = std::fs::remove_file(partial_path(&job))
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(error.into());
+            }
+            job.status = Status::Cancelled;
+            job.error = None;
+            job.conflict = None;
+            updates.push((job.id.clone(), job));
+        }
+        self.store.put_many("transfers", &updates)?;
+        let ids = updates.iter().map(|(id, _)| id.clone()).collect();
+        jobs.extend(updates);
+        Ok(ids)
+    }
     pub fn resume(self: &Arc<Self>, s3: S3, id: &str) -> Result<()> {
         let mut job = self.get(id)?;
         if !matches!(job.status, Status::Paused | Status::Failed) {
@@ -488,6 +640,7 @@ impl Engine {
         }
         job.status = Status::Queued;
         let control = Control {
+            epoch: None,
             token: CancellationToken::new(),
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
@@ -507,9 +660,30 @@ impl Engine {
             })
             .map(|j| j.id.clone())
             .collect();
+        self.store.delete_many("transfers", &ids)?;
         for id in ids {
-            self.store.delete("transfers", &id)?;
             jobs.remove(&id);
+        }
+        let remaining_batches: std::collections::HashSet<_> = jobs
+            .values()
+            .filter_map(|job| job.batch_id.clone())
+            .collect();
+        let mut feeds = self.feeds.lock().map_err(lock)?;
+        let finished: Vec<_> = feeds
+            .iter()
+            .filter(|(id, feed)| {
+                !remaining_batches.contains(*id)
+                    && !matches!(
+                        *feed.state.borrow(),
+                        batch::FeedState::Running | batch::FeedState::Paused
+                    )
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.store.delete_many("upload_batches", &finished)?;
+        self.store.delete_many("upload_policies", &finished)?;
+        for id in finished {
+            feeds.remove(&id);
         }
         Ok(())
     }
@@ -519,10 +693,13 @@ impl Engine {
     async fn run(&self, s3: &S3, job: &mut Transfer, control: &Control) -> Result<()> {
         let _file = tokio::select! { biased; _ = control.token.cancelled() => return Err(Error::Paused), permit = self.files.clone().acquire_owned() => permit.map_err(|_| Error::Cancelled)? };
         job.status = Status::Preparing;
-        self.save(job)?;
+        self.persist(job).await?;
         match job.direction {
             Direction::Upload => self.upload(s3, job, control).await?,
             Direction::Download => self.download(s3, job, control).await?,
+        }
+        if job.status == Status::Skipped {
+            return Ok(());
         }
         job.status = Status::Completed;
         job.bytes_done = job.size;
@@ -536,29 +713,82 @@ impl Engine {
         Ok(())
     }
     async fn upload(&self, s3: &S3, job: &mut Transfer, control: &Control) -> Result<()> {
-        s3.profile.writable()?;
-        self.validate_source(job).await?;
-        {
-            let _permit = self.request(control).await?;
-            let existing = tokio::select! { biased;
-                _ = control.token.cancelled() => return Err(Error::Paused),
-                result = s3.head_optional(&job.key) => result?
-            };
-            let matches = match (&job.upload_condition, existing) {
-                (UploadCondition::Create, None) => true,
-                (UploadCondition::Replace { etag }, Some(info)) => *etag == info.etag,
-                _ => false,
-            };
-            if !matches {
-                return Err(Error::Conflict("Upload destination exists or changed since confirmation. Upload again to review Replace, Skip or Keep both.".into()));
+        loop {
+            let fast_create = job.batch_id.is_some()
+                && job.upload_condition == UploadCondition::Create
+                && self.batch_policy(job.batch_id.as_deref())?.is_none()
+                && job.size < job.settings.multipart_threshold;
+            if !fast_create {
+                let _permit = self.request(control).await?;
+                let existing = tokio::select! { biased;
+                    _ = control.token.cancelled() => return Err(Error::Paused),
+                    result = s3.head_optional(&job.key) => result?
+                };
+                match (&job.upload_condition, existing) {
+                    (UploadCondition::Create, Some(info)) => {
+                        self.destination_conflict(s3, job, info, true).await?
+                    }
+                    (UploadCondition::Replace { etag }, Some(info)) if *etag != info.etag => {
+                        self.destination_conflict(s3, job, info, false).await?
+                    }
+                    (UploadCondition::Replace { .. }, None) => return Err(Error::Conflict(
+                        "Destination disappeared after confirmation. Upload again to review it."
+                            .into(),
+                    )),
+                    _ => {}
+                }
+            }
+            if job.status == Status::Skipped {
+                return Ok(());
+            }
+            match self.upload_body(s3, job, control).await {
+                Err(Error::DestinationChanged) if job.batch_id.is_some() => {
+                    let _permit = self.request(control).await?;
+                    let info = s3.head_optional(&job.key).await?.ok_or_else(|| {
+                        Error::Conflict(
+                            "Destination changed during upload; retry with a fresh confirmation"
+                                .into(),
+                        )
+                    })?;
+                    let allow_policy = job.upload_condition == UploadCondition::Create;
+                    self.destination_conflict(s3, job, info, allow_policy)
+                        .await?;
+                    if job.status == Status::Skipped {
+                        return Ok(());
+                    }
+                }
+                result => return result,
             }
         }
+    }
+    async fn destination_conflict(
+        &self,
+        s3: &S3,
+        job: &mut Transfer,
+        info: voids3_s3::ObjectInfo,
+        allow_policy: bool,
+    ) -> Result<()> {
+        if job.batch_id.is_none() {
+            return Err(Error::Conflict(
+                "Upload destination exists or changed; it was not overwritten".into(),
+            ));
+        }
+        job.conflict = Some(info);
+        if allow_policy && let Some(action) = self.batch_policy(job.batch_id.as_deref())? {
+            self.apply_conflict(s3, job, action).await?;
+            return Ok(());
+        }
+        Err(Error::Conflict("Destination exists or changed. Choose Replace, Skip or Keep both in the queue; other files continue.".into()))
+    }
+    async fn upload_body(&self, s3: &S3, job: &mut Transfer, control: &Control) -> Result<()> {
+        s3.profile.writable()?;
+        self.validate_source(job).await?;
         let (if_match, if_none_match) = match &job.upload_condition {
             UploadCondition::Create => (None, Some("*".to_owned())),
             UploadCondition::Replace { etag } => (Some(etag.clone()), None),
         };
         job.status = Status::Uploading;
-        self.save(job)?;
+        self.persist(job).await?;
         if job.size < job.settings.multipart_threshold {
             let _permit = self.request(control).await?;
             let body = ByteStream::from_path(&job.local_path)
@@ -569,7 +799,7 @@ impl Engine {
                 result = s3.client.put_object().bucket(&s3.profile.bucket).key(&job.key)
                     .set_if_match(if_match).set_if_none_match(if_none_match)
                     .content_type(mime_guess::from_path(&job.local_path).first_or_octet_stream().as_ref()).body(body).send() => {
-                    result.map_err(|e| api_error("Upload", e.as_service_error().and_then(|s| s.meta().code())))?;
+                    result.map_err(|e| upload_error("Upload", e.as_service_error().and_then(|s| s.meta().code())))?;
                 }
             }
             self.validate_source(job).await?;
@@ -603,7 +833,7 @@ impl Engine {
                     })?
                     .into(),
             );
-            self.save(job)?;
+            self.persist(job).await?;
         } else {
             // Provider state is authoritative: a cancelled request may have completed server-side.
             let mut parts = BTreeMap::new();
@@ -666,7 +896,7 @@ impl Engine {
                 .keys()
                 .map(|n| (job.size - (*n as u64 - 1) * job.part_size).min(job.part_size))
                 .sum();
-            self.save(job)?;
+            self.persist(job).await?;
         }
         let missing: Vec<i32> = (1..=job.size.div_ceil(job.part_size) as i32)
             .filter(|n| !job.parts.contains_key(n))
@@ -699,12 +929,12 @@ impl Engine {
             let (number, etag, length) = result?;
             job.parts.insert(number, etag);
             job.bytes_done += length;
-            self.save(job)?;
+            self.persist(job).await?;
         }
         drop(pending);
         self.validate_source(job).await?;
         job.status = Status::Verifying;
-        self.save(job)?;
+        self.persist(job).await?;
         let _permit = self.request(control).await?;
         let parts = job
             .parts
@@ -732,7 +962,7 @@ impl Engine {
             .send()
             .await
             .map_err(|e| {
-                api_error(
+                upload_error(
                     "Complete multipart upload",
                     e.as_service_error().and_then(|s| s.meta().code()),
                 )
@@ -774,7 +1004,7 @@ impl Engine {
         let offset = file.metadata().await?.len();
         job.bytes_done = offset;
         job.status = Status::Downloading;
-        self.save(job)?;
+        self.persist(job).await?;
         if offset < job.size {
             let output = s3
                 .client
@@ -836,7 +1066,7 @@ impl Engine {
             ));
         }
         job.status = Status::Verifying;
-        self.save(job)?;
+        self.persist(job).await?;
         file.sync_all().await?;
         drop(file);
         // Same-directory hard link gives atomic no-replace finalization on supported filesystems.
@@ -853,10 +1083,57 @@ fn partial_path(job: &Transfer) -> PathBuf {
 fn lock(e: impl std::fmt::Display) -> Error {
     Error::Storage(e.to_string())
 }
+fn upload_error(operation: &str, code: Option<&str>) -> Error {
+    if matches!(
+        code,
+        Some("PreconditionFailed" | "ConditionalRequestConflict" | "412" | "409")
+    ) {
+        Error::DestinationChanged
+    } else {
+        api_error(operation, code)
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ten_thousand_jobs_have_bounded_pages_and_correct_aggregate_counts() {
+        let (_dir, engine, template) = fixture();
+        {
+            let mut jobs = engine.jobs.lock().unwrap();
+            jobs.clear();
+            for index in 0..10_000 {
+                let mut job = template.clone();
+                job.id = format!("{index:05}");
+                job.status = if index % 2 == 0 {
+                    Status::Completed
+                } else {
+                    Status::Conflict
+                };
+                jobs.insert(job.id.clone(), job);
+            }
+        }
+        let started = std::time::Instant::now();
+        let summary = engine.summary().unwrap();
+        let page = engine.page("conflict", 4900, 100).unwrap();
+        println!(
+            "10,000-job aggregate + final 100-row filtered page: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(summary.total, 10_000);
+        assert_eq!(summary.counts.get("conflict"), Some(&5000));
+        assert_eq!(page.total, 5000);
+        assert_eq!(page.items.len(), 100);
+        assert!(page.items.iter().all(|job| job.status == Status::Conflict));
+        assert!(engine.page("all", 0, 101).is_err());
+        assert!(engine.page("all", 10_000, 100).unwrap().items.is_empty());
+        assert_eq!(engine.cancel_idle().unwrap().len(), 5000);
+        assert_eq!(
+            engine.summary().unwrap().counts.get("cancelled"),
+            Some(&5000)
+        );
+    }
     fn fixture() -> (tempfile::TempDir, Arc<Engine>, Transfer) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&dir.path().join("queue.db")).unwrap());
@@ -890,6 +1167,8 @@ mod tests {
             parts: BTreeMap::new(),
             source: None,
             remote_etag: Some("test-etag".into()),
+            batch_id: None,
+            conflict: None,
             upload_condition: UploadCondition::default(),
             priority: 0,
             settings: TransferSettings::default(),
@@ -904,6 +1183,7 @@ mod tests {
             .into_iter()
             .map(|id| {
                 let control = Control {
+                    epoch: None,
                     token: CancellationToken::new(),
                     cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 };
@@ -953,6 +1233,7 @@ mod tests {
         engine.controls.lock().unwrap().insert(
             job.id.clone(),
             Control {
+                epoch: None,
                 token: CancellationToken::new(),
                 cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },

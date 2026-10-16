@@ -1,6 +1,8 @@
-# Feature status at 0.2.1
+# Feature status at 0.3.0
 
 Implemented means code exists; verification evidence is recorded separately in [validation.md](validation.md). This is not the complete product described in the original brief.
+
+Version 0.3.0 adds bounded background upload discovery, per-file conflict waiting, lightweight queue pages and five transfer presets. See [transfers.md](transfers.md) for limits and [roadmap.md](roadmap.md) for proposed improvements.
 
 | Area         | Implemented                                                                                                                                                                                                                                                                                                | Unfinished / limits                                                                                                                                            |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — 2026-10-16
+
+- Start uploads through bounded background discovery instead of checking every destination first. New small files use conditional uploads directly; conflicts wait per file while other uploads continue.
+- Apply conflict choices to the current batch, including later files; stop discovery and deferred decisions with global pause/cancel. Preserve conditional replacement and explicit restart recovery.
+- Fetch aggregate queue statistics and at most 100 lightweight rows per page, stop collapsed-row polling, and move durable queue writes off the async executor. Batch idle cancellation/history deletion in SQLite transactions.
+- Add five transfer presets with descriptions and editable advanced values.
+- Add 10,000-job queue tests, streaming S3 integration coverage, and a prioritized improvement roadmap.
+
 ## 0.2.1 — 2026-10-16
 
 - Ask how to handle existing upload destinations, with Replace, Skip, Keep both, sizes/timestamps, batch-scoped Apply to all, and whole-batch cancellation.

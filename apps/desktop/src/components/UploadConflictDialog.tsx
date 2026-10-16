@@ -1,11 +1,6 @@
 import { useState } from "react";
 import { ArrowRight, Files, Replace } from "lucide-react";
-import {
-  bytes,
-  type ConflictAction,
-  type PreparedUpload,
-  type UploadChoice,
-} from "../lib/api";
+import { bytes, type ConflictAction, type Transfer } from "../lib/api";
 import { Modal } from "./Modal";
 import { Button } from "./ui/button";
 
@@ -15,37 +10,37 @@ function modified(seconds: number | null) {
     : new Date(seconds * 1000).toLocaleString();
 }
 export function UploadConflictDialog({
-  plan,
+  job,
   onResolve,
-  onCancel,
+  onClose,
+  busy = false,
+  error = "",
 }: {
-  plan: PreparedUpload;
-  onResolve: (choices: UploadChoice[]) => void;
-  onCancel: () => void;
+  job: Transfer;
+  onResolve: (action: ConflictAction, all: boolean) => void;
+  onClose: () => void;
+  busy?: boolean;
+  error?: string;
 }) {
-  const [choices, setChoices] = useState<UploadChoice[]>([]);
   const [applyAll, setApplyAll] = useState(false);
-  const conflict = plan.conflicts[choices.length];
-  const remaining = plan.conflicts.length - choices.length;
-  const canReplace = applyAll
-    ? plan.conflicts.slice(choices.length).every((item) => item.can_replace)
-    : conflict.can_replace;
+  const conflict = {
+    key: job.key,
+    path: job.local_path,
+    source: { size: job.size, modified: job.source_modified ?? null },
+    destination: job.conflict ?? { size: 0, modified: null },
+    can_replace: job.conflict?.can_replace ?? false,
+  };
+  const canReplace = conflict.can_replace;
   function choose(action: ConflictAction) {
-    const next = [
-      ...choices,
-      ...(applyAll ? plan.conflicts.slice(choices.length) : [conflict]).map(
-        ({ index }) => ({ index, action }),
-      ),
-    ];
-    if (next.length === plan.conflicts.length) onResolve(next);
-    else setChoices(next);
+    if (!busy) onResolve(action, applyAll);
   }
   return (
     <Modal
       title="File already exists"
-      description={`Conflict ${choices.length + 1} of ${plan.conflicts.length} · ${plan.total} file(s) in this upload`}
+      description="This file is waiting for your decision. Other files continue uploading."
       wide
-      onClose={onCancel}
+      onClose={onClose}
+      closeDisabled={busy}
     >
       <div className="upload-conflict">
         <p className="conflict-key">{conflict.key}</p>
@@ -73,34 +68,43 @@ export function UploadConflictDialog({
         </div>
         <p className="muted">
           Replace updates the confirmed version. Keep both adds a numbered
-          filename. Nothing in this batch starts until every conflict is
-          resolved.
+          filename. Only this file waits; the rest of the batch continues.
         </p>
         {!canReplace && (
           <p role="status">
             The provider did not return an ETag. Choose Skip or Keep both.
           </p>
         )}
-        {remaining > 1 && (
+        {job.batch_id && (
           <label className="conflict-apply">
             <input
               type="checkbox"
               checked={applyAll}
               onChange={(event) => setApplyAll(event.target.checked)}
             />{" "}
-            Apply to all remaining conflicts in this upload ({remaining})
+            Apply to all conflicts in this upload, including files discovered
+            later
           </label>
         )}
+        {error && (
+          <p className="error-box" role="alert">
+            {error}
+          </p>
+        )}
         <div className="conflict-actions">
-          <Button onClick={onCancel}>Cancel upload</Button>
+          <Button onClick={onClose} disabled={busy}>
+            Decide later
+          </Button>
           <div>
-            <Button onClick={() => choose("skip")} autoFocus>
+            <Button onClick={() => choose("skip")} disabled={busy} autoFocus>
               Skip
             </Button>
-            <Button onClick={() => choose("keep_both")}>Keep both</Button>
+            <Button disabled={busy} onClick={() => choose("keep_both")}>
+              Keep both
+            </Button>
             <Button
               variant="destructive"
-              disabled={!canReplace}
+              disabled={busy || !canReplace}
               onClick={() => choose("replace")}
             >
               Replace

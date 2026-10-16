@@ -83,14 +83,32 @@ function mount(readOnly = false) {
     pages: [{ entries: files, next_token: null }],
     pageParams: [null],
   });
-  client.setQueryData(["transfers"], jobs);
+  const summary = {
+    total: jobs.length,
+    active: 1,
+    counts: { uploading: 1, paused: 1, completed: 1 },
+    bytes_done: 30,
+    cancellable: 2,
+    clearable: 1,
+    recent_errors: [],
+    batches: [],
+  };
+  client.setQueryData(["transfers", "summary"], summary);
+  client.setQueryData(["transfers", "page", "all", 0], {
+    total: jobs.length,
+    offset: 0,
+    items: jobs,
+  });
   mockApi.mockImplementation(async (action) => {
     if (action === "profiles") return [saved];
     if (action === "home") return "C:/test";
     if (action === "local_list")
       return files.map((file) => ({ ...file, path: `C:/test/${file.name}` }));
     if (action === "remote_list") return { entries: files, next_token: null };
-    if (action === "transfers") return jobs;
+    if (action === "transfer_summary") return summary;
+    if (action === "transfer_page")
+      return { total: jobs.length, offset: 0, items: jobs };
+    if (action === "start_upload") return "upload-batch";
     if (action === "transfer_control_all")
       return { requested: 2, failed: 0, errors: [] };
     if (action === "delete_entries")
@@ -119,54 +137,35 @@ beforeEach(() => {
   });
 });
 describe("workspace actions", () => {
-  it("sends selected local files through conflict preflight before uploading", async () => {
+  it("starts selected uploads in the background without a preflight modal", async () => {
     mount();
     const user = userEvent.setup();
     await user.selectOptions(
       screen.getByRole("combobox", { name: "Active connection" }),
       profile.id,
     );
-    const local = screen.getByRole("listbox", { name: "Local files" });
-    fireEvent.click(within(local).getAllByRole("option")[0]);
-    const fallback = mockApi.getMockImplementation()!;
-    mockApi.mockImplementation(async (action, args) => {
-      if (action === "prepare_upload")
-        return {
-          id: "upload-plan",
-          total: 1,
-          conflicts: [
-            {
-              index: 0,
-              path: "C:/test/alpha.txt",
-              key: "alpha.txt",
-              source: { size: 20, modified: null },
-              destination: { size: 40, modified: null },
-              can_replace: true,
-            },
-          ],
-        };
-      if (action === "commit_upload")
-        return { queued: ["new-upload"], skipped: 0, failed: 0, errors: [] };
-      return fallback(action, args);
-    });
+    fireEvent.click(
+      within(screen.getByRole("listbox", { name: "Local files" })).getAllByRole(
+        "option",
+      )[0],
+    );
     await user.click(
       screen.getByRole("button", { name: /Upload.*Local → S3/ }),
     );
-    expect(mockApi).toHaveBeenCalledWith("prepare_upload", {
-      id: profile.id,
-      paths: ["C:/test/alpha.txt"],
-      prefix: "",
-    });
-    expect(
-      screen.getByRole("dialog", { name: "File already exists" }),
-    ).toHaveTextContent("alpha.txt");
-    expect(mockApi).not.toHaveBeenCalledWith("upload", expect.anything());
-    await user.click(screen.getByRole("button", { name: "Replace" }));
     await waitFor(() =>
-      expect(mockApi).toHaveBeenCalledWith("commit_upload", {
-        id: "upload-plan",
-        choices: [{ index: 0, action: "replace" }],
+      expect(mockApi).toHaveBeenCalledWith("start_upload", {
+        id: profile.id,
+        paths: ["C:/test/alpha.txt"],
+        prefix: "",
       }),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("listbox", { name: "Local files" }),
+    ).toBeInTheDocument();
+    expect(mockApi).not.toHaveBeenCalledWith(
+      "prepare_upload",
+      expect.anything(),
     );
   });
   it("pauses all connections and confirms cancellation independently of the queue filter", async () => {

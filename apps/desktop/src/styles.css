@@ -1063,8 +1063,8 @@ pre {
 .transfer-panel.expanded {
   display: flex;
   flex-direction: column;
-  height: 140px;
-  min-height: 140px;
+  height: 240px;
+  min-height: 180px;
   max-height: 45vh;
   resize: vertical;
   overflow: auto;
@@ -1798,7 +1798,8 @@ progress::-webkit-progress-value {
   .transfer-panel.expanded {
     resize: none;
     max-height: none;
-    height: 180px;
+    height: 260px;
+    min-height: 240px;
   }
   .transfer-row {
     flex-wrap: wrap;
@@ -2072,4 +2073,43 @@ progress::-webkit-progress-value {
   .conflict-comparison > svg {
     display: none;
   }
+}
+
+.queue-pagination,
+.batch-progress,
+.conflict-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11px;
+}
+.queue-pagination > span {
+  margin-right: auto;
+  color: var(--muted);
+}
+.batch-progress {
+  color: var(--muted);
+}
+.conflict-notice {
+  color: var(--warning);
+  background: var(--raised);
+  text-align: left;
+}
+.transfer-status.conflict {
+  color: var(--warning);
+}
+.transfer-status.skipped {
+  color: var(--muted);
+}
+.queue-batches {
+  max-height: 72px;
+  flex: none;
+  overflow: auto;
+}
+.queue-heading > .queue-conflict-badge {
+  display: inline-flex;
+  color: var(--warning);
 }

@@ -47,6 +47,53 @@ export interface Transfer {
   error: string | null;
   created: number;
   upload_id: string | null;
+  batch_id?: string | null;
+  source_modified?: number | null;
+  conflict?: {
+    size: number;
+    modified: number | null;
+    can_replace: boolean;
+  } | null;
+}
+export interface UploadBatch {
+  id: string;
+  profile_id: string;
+  discovered: number;
+  state:
+    "running" | "paused" | "cancelled" | "finished" | "interrupted" | "failed";
+  error: string | null;
+  policy: ConflictAction | null;
+}
+export interface QueueSummary {
+  total: number;
+  active: number;
+  counts: Record<string, number>;
+  bytes_done: number;
+  cancellable: number;
+  clearable: number;
+  recent_errors: Transfer[];
+  batches: UploadBatch[];
+}
+export interface QueuePage {
+  total: number;
+  offset: number;
+  items: Transfer[];
+}
+export const emptyQueueSummary: QueueSummary = {
+  total: 0,
+  active: 0,
+  counts: {},
+  bytes_done: 0,
+  cancellable: 0,
+  clearable: 0,
+  recent_errors: [],
+  batches: [],
+};
+export interface TransferPreset {
+  id: string;
+  name: string;
+  description: string;
+  settings: TransferSettings;
 }
 export interface TransferSettings {
   concurrent_files: number;
@@ -68,29 +115,6 @@ export interface DeleteResult {
   errors: string[];
 }
 export type ConflictAction = "replace" | "skip" | "keep_both";
-export interface UploadChoice {
-  index: number;
-  action: ConflictAction;
-}
-export interface UploadConflict {
-  index: number;
-  path: string;
-  key: string;
-  source: { size: number; modified: number | null };
-  destination: { size: number; modified: number | null };
-  can_replace: boolean;
-}
-export interface PreparedUpload {
-  id: string;
-  total: number;
-  conflicts: UploadConflict[];
-}
-export interface UploadResult {
-  queued: string[];
-  skipped: number;
-  failed: number;
-  errors: string[];
-}
 export interface Change {
   key: string;
   action: "upload" | "download" | "conflict" | "skip";

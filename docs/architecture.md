@@ -1,5 +1,7 @@
 # Architecture
 
+Desktop upload admission uses bounded background discovery; conditional-write conflicts suspend individual files without holding a worker slot. The UI requests aggregate statistics and bounded lightweight queue pages. Durable queue writes run on blocking workers, with transactional idle cancellation/history cleanup. See [transfers.md](transfers.md) for limits and recovery.
+
 VoidS3 is a Cargo workspace with a separate npm frontend workspace. Desktop and CLI share all provider/transfer code.
 
 | Module                   | Responsibility                                                                                            |

@@ -1,6 +1,11 @@
 import { useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, message, type TransferSettings } from "../lib/api";
+import {
+  api,
+  message,
+  type TransferSettings,
+  type TransferPreset,
+} from "../lib/api";
 import { usePreferences } from "../store";
 import { version } from "../../package.json";
 import { Modal } from "./Modal";
@@ -21,9 +26,24 @@ export function SettingsDialog({
     queryFn: () => api<TransferSettings>("settings"),
   });
   const [draft, setDraft] = useState<TransferSettings>();
+  const [advanced, setAdvanced] = useState(false);
+  const presets = useQuery({
+    queryKey: ["transfer-presets"],
+    queryFn: () => api<TransferPreset[]>("transfer_presets"),
+    staleTime: Infinity,
+  });
   const [failure, setFailure] = useState("");
   const [busy, setBusy] = useState(false);
   const settings = draft ?? data;
+  const selectedPreset = presets.data?.find(
+    (preset) =>
+      settings &&
+      Object.keys(preset.settings).every(
+        (key) =>
+          preset.settings[key as keyof TransferSettings] ===
+          settings[key as keyof TransferSettings],
+      ),
+  );
   const preferences = usePreferences();
   const queryClient = useQueryClient();
   async function save(e: FormEvent) {
@@ -43,7 +63,7 @@ export function SettingsDialog({
   return (
     <Modal
       title="Settings"
-      description="Conservative defaults. Tune only after measuring real transfers."
+      description="Choose a transfer preset, then adjust advanced settings if needed."
       onClose={onClose}
       closeDisabled={updater.busy}
     >
@@ -99,8 +119,51 @@ export function SettingsDialog({
         </label>
         <div className="section-label">TRANSFER ENGINE</div>
         {error && <p className="error-box">{message(error)}</p>}
+        {presets.error && <p className="error-box">{message(presets.error)}</p>}
         {settings && (
-          <div className="form-grid">
+          <>
+            <label>
+              Transfer preset
+              <select
+                value={selectedPreset?.id ?? "custom"}
+                disabled={busy}
+                onChange={(event) => {
+                  const preset = presets.data?.find(
+                    (preset) => preset.id === event.target.value,
+                  );
+                  if (preset) setDraft({ ...preset.settings });
+                  else setAdvanced(true);
+                }}
+              >
+                <option value="custom">Custom settings</option>
+                {presets.data?.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="muted" role="status">
+              {selectedPreset?.description ??
+                "Your custom transfer settings. Choose a preset to start from its values."}{" "}
+              Presets are starting points; provider limits and connection
+              quality vary.
+            </p>
+            <Button
+              aria-expanded={advanced}
+              aria-controls="advanced-transfer-settings"
+              onClick={() => setAdvanced(!advanced)}
+            >
+              Advanced transfer settings
+            </Button>
+          </>
+        )}
+        {settings && (
+          <div
+            className="form-grid"
+            id="advanced-transfer-settings"
+            hidden={!advanced}
+          >
             {(
               [
                 ["concurrent_files", "Concurrent files", 1, 16, 1],

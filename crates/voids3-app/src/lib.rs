@@ -3,21 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    sync::Arc,
 };
 use voids3_core::{Error, Result, TransferSettings};
 use voids3_s3::S3;
 use voids3_storage::Store;
-use voids3_transfer::upload::{UploadBatch, UploadChoice, UploadPreview, UploadResult};
 use voids3_transfer::{Direction, Engine, Status};
-
-#[derive(Serialize)]
-pub struct PreparedUpload {
-    pub id: String,
-    #[serde(flatten)]
-    pub preview: UploadPreview,
-}
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,7 +54,6 @@ impl DeleteResult {
 pub struct App {
     pub store: Arc<Store>,
     pub engine: Arc<Engine>,
-    uploads: Mutex<HashMap<String, (Instant, UploadBatch)>>,
     _instance_lock: std::fs::File,
 }
 impl App {
@@ -82,7 +72,6 @@ impl App {
         Ok(Self {
             store,
             engine,
-            uploads: Mutex::new(HashMap::new()),
             _instance_lock: instance_lock,
         })
     }
@@ -90,6 +79,18 @@ impl App {
         Ok(self.store.get("settings", "transfers")?.unwrap_or_default())
     }
     pub fn delete_profile(&self, id: &str) -> Result<()> {
+        if self.engine.summary()?.batches.iter().any(|batch| {
+            batch.profile_id == id
+                && matches!(
+                    batch.state,
+                    voids3_transfer::batch::FeedState::Running
+                        | voids3_transfer::batch::FeedState::Paused
+                )
+        }) {
+            return Err(Error::Conflict(
+                "Finish or cancel this connection's upload discovery first".into(),
+            ));
+        }
         if self
             .engine
             .list()?
@@ -105,13 +106,24 @@ impl App {
         self.store.put("settings", "transfers", &settings)
     }
     pub async fn control_all(&self, operation: BatchControl) -> Result<BatchControlResult> {
-        let interrupted: HashSet<_> = match operation {
+        let mut interrupted: HashSet<_> = match operation {
             BatchControl::Pause => self.engine.interrupt_all(false)?,
             BatchControl::Cancel => self.engine.interrupt_all(true)?,
             BatchControl::Resume => Vec::new(),
         }
         .into_iter()
         .collect();
+        if matches!(operation, BatchControl::Cancel) {
+            let engine = self.engine.clone();
+            interrupted.extend(
+                tokio::task::spawn_blocking(move || engine.cancel_idle())
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))??,
+            );
+        }
+        if matches!(operation, BatchControl::Resume) {
+            self.engine.resume_batches()?;
+        }
         let mut result = BatchControlResult {
             requested: interrupted.len(),
             ..Default::default()
@@ -156,7 +168,13 @@ impl App {
                     .map_err(Error::Provider)?;
                 match operation {
                     BatchControl::Cancel => self.engine.cancel(client, &job.id),
-                    BatchControl::Resume => self.engine.resume(client, &job.id),
+                    BatchControl::Resume => {
+                        let engine = self.engine.clone();
+                        let id = job.id.clone();
+                        tokio::task::spawn_blocking(move || engine.resume(client, &id))
+                            .await
+                            .map_err(|e| Error::Storage(e.to_string()))?
+                    }
                     BatchControl::Pause => Ok(()),
                 }
             }
@@ -213,69 +231,32 @@ impl App {
         }
         Ok(ids)
     }
-    pub async fn prepare_upload(
+    pub async fn start_upload(
         &self,
         id: &str,
         paths: Vec<PathBuf>,
-        prefix: &str,
-    ) -> Result<PreparedUpload> {
-        let batch =
-            UploadBatch::prepare(self.client(id).await?, paths, prefix, self.settings()?).await?;
-        let preview = batch.preview();
-        let mut uploads = self
-            .uploads
-            .lock()
-            .map_err(|e| Error::Storage(e.to_string()))?;
-        uploads.retain(|_, (created, _)| created.elapsed() < Duration::from_secs(900));
-        if uploads.len() >= 4 {
-            return Err(Error::Conflict(
-                "Finish or cancel the pending upload confirmations first".into(),
-            ));
-        }
-        let id = uuid::Uuid::new_v4().to_string();
-        uploads.insert(id.clone(), (Instant::now(), batch));
-        Ok(PreparedUpload { id, preview })
-    }
-    pub fn discard_upload(&self, id: &str) -> Result<()> {
-        self.uploads
-            .lock()
+        prefix: String,
+    ) -> Result<String> {
+        let client = self.client(id).await?;
+        let settings = self.settings()?;
+        let engine = self.engine.clone();
+        tokio::task::spawn_blocking(move || engine.start_batch(client, paths, prefix, settings))
+            .await
             .map_err(|e| Error::Storage(e.to_string()))?
-            .remove(id);
-        Ok(())
     }
-    pub async fn commit_upload(
+    pub async fn resolve_upload(
         &self,
         id: &str,
-        choices: Vec<UploadChoice>,
-    ) -> Result<UploadResult> {
-        let (created, batch) = self
-            .uploads
-            .lock()
+        action: voids3_transfer::upload::ConflictAction,
+        all: bool,
+    ) -> Result<()> {
+        let job = self.engine.transfer(id)?;
+        let client = self.client(&job.profile_id).await?;
+        let engine = self.engine.clone();
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || engine.resolve_conflicts(client, &id, action, all))
+            .await
             .map_err(|e| Error::Storage(e.to_string()))?
-            .remove(id)
-            .ok_or_else(|| {
-                Error::Invalid(
-                    "Upload confirmation expired or was already used. Upload again.".into(),
-                )
-            })?;
-        if created.elapsed() >= Duration::from_secs(900) {
-            return Err(Error::Conflict(
-                "Upload confirmation expired. Upload again to recheck destinations.".into(),
-            ));
-        }
-        let current = self.store.profile(&batch.profile().id)?;
-        current.writable()?;
-        let target = batch.profile();
-        if current.endpoint != target.endpoint
-            || current.bucket != target.bucket
-            || current.region != target.region
-            || current.path_style != target.path_style
-        {
-            return Err(Error::Conflict(
-                "Connection changed since upload preflight. Upload again.".into(),
-            ));
-        }
-        batch.enqueue(&self.engine, choices).await
     }
     pub async fn delete_entries(
         &self,

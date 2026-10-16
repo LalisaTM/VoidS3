@@ -1,5 +1,12 @@
 # Validation evidence
 
+Large-batch update validated locally on Windows x64, 2026-10-16:
+
+- Thirty-nine frontend tests cover background upload registration, per-file conflict decisions, future batch policies, presets/custom edits, a 10,000-item summary with only 100 rendered rows, pagination/filter requests and no collapsed-page fetching.
+- Rust tests cover bounded discovery chunks, interrupted discovery recovery and saved batch policies, preset validation and 10,000-job aggregation/pagination/transactional cancellation. One local debug-build aggregate plus final 100-row filtered page took approximately 4.6 ms; this is a synthetic queue-processing measurement, not a cloud-throughput or native-frame-rate benchmark.
+- Real HTTP Moto integration verifies files completing before discovery finishes, conflicts not blocking fresh files, future batch policies, changed-source refusal, single/multipart replacements, Keep both and global pause/cancel of further admission with the updater guard.
+- Strict TypeScript/Vite build, ESLint, Clippy with warnings denied and workspace tests pass. Installed Windows frame-rate tracing, 10,000 real image transfers and live-provider performance remain unverified.
+
 Upload-conflict update validated on Windows x64, 2026-10-16:
 
 - Thirty-seven frontend tests pass, including mixed and apply-to-all choices, cancellation/Escape, missing ETags, immediate conflict-free enqueue, cancelled in-flight preflight, fresh confirmation after failure, and the actual workspace upload entry point.

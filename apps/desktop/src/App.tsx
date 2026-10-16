@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   useInfiniteQuery,
   useQuery,
@@ -8,7 +8,6 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useFileDragDrop } from "./lib/useFileDragDrop";
 import { useUpdater } from "./lib/useUpdater";
 import { useUpload } from "./lib/useUpload";
-import { UploadConflictDialog } from "./components/UploadConflictDialog";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -50,7 +49,8 @@ import {
   type DeleteResult,
   type Page,
   type Profile,
-  type Transfer,
+  type QueueSummary,
+  emptyQueueSummary,
 } from "./lib/api";
 import { usePreferences } from "./store";
 import { version } from "../package.json";
@@ -60,7 +60,7 @@ import { WorkspaceHeader } from "./components/WorkspaceHeader";
 import { SplitHandle } from "./components/SplitHandle";
 import { Files } from "./components/Files";
 import { Modal } from "./components/Modal";
-import { Queue } from "./components/Queue";
+import { QueuePanel } from "./components/QueuePanel";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SyncDialog } from "./components/SyncDialog";
 
@@ -118,18 +118,13 @@ export default function App() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const uploads = useUpload({
-    onComplete: (result) => {
+    onStarted: () => {
       preferences.set({ queueOpen: true });
       setNotice(
-        `${result.queued.length} file(s) queued, ${result.skipped} skipped.`,
+        "Upload started. Files are discovered in the background; conflicts wait in the queue while other files continue.",
       );
-      if (result.failed)
-        setError(
-          `${result.failed} file(s) could not be queued. ${result.errors.join(" · ")}`,
-        );
       void query.invalidateQueries({ queryKey: ["transfers"] });
     },
-    onError: setError,
   });
   const [prompt, setPrompt] = useState<Prompt>();
   const [localSelection, setLocalSelection] = useState<string[]>([]);
@@ -170,18 +165,20 @@ export default function App() {
     getNextPageParam: (page) => page.next_token,
   });
   const transfers = useQuery({
-    queryKey: ["transfers"],
-    queryFn: () => api<Transfer[]>("transfers"),
+    queryKey: ["transfers", "summary"],
+    queryFn: () => api<QueueSummary>("transfer_summary"),
     enabled: desktop,
-    refetchInterval: 750,
+    refetchInterval: 1000,
   });
-  const entries = remoteFiles.data?.pages.flatMap((p) => p.entries) ?? [];
-  const jobs = transfers.data ?? [];
-  const active = jobs.filter((j) =>
-    ["uploading", "downloading", "queued", "preparing", "verifying"].includes(
-      j.status,
-    ),
-  ).length;
+  const entries = useMemo(
+    () => remoteFiles.data?.pages.flatMap((page) => page.entries) ?? [],
+    [remoteFiles.data],
+  );
+  const summary = transfers.data ?? emptyQueueSummary;
+  const jobs = summary.recent_errors;
+  const active =
+    summary.active +
+    summary.batches.filter((batch) => batch.state === "running").length;
   useEffect(() => {
     document.documentElement.dataset.theme = preferences.theme;
   }, [preferences.theme]);
@@ -337,7 +334,7 @@ export default function App() {
       });
       await query.invalidateQueries({ queryKey: ["transfers"] });
       setNotice(
-        `${operation === "pause" ? "Pause" : operation === "resume" ? "Resume" : "Cancellation"} requested for ${result.requested} transfer(s). In-flight requests may finish before stopping.`,
+        `${operation === "pause" ? "Pause" : operation === "resume" ? "Resume" : "Cancellation"} requested for ${result.requested} transfer(s). Folder discovery follows this action too. In-flight requests may finish before stopping.`,
       );
       if (result.failed)
         throw new Error(
@@ -355,7 +352,7 @@ export default function App() {
     setPrompt({
       title: "Cancel all transfers?",
       description:
-        "Cancels running, queued, paused, and failed transfers across every connection. Completed files remain. Multipart uploads and temporary download files are cleaned up where possible.",
+        "Stops folder discovery and cancels running, queued, paused, waiting, and failed transfers across every connection. Completed files remain. Multipart uploads and temporary download files are cleaned up where possible.",
       destructive: true,
       label: "Cancel all transfers",
       execute: () => controlAll("cancel"),
@@ -1146,8 +1143,8 @@ export default function App() {
               </section>
             )}
           </div>
-          <Queue
-            jobs={jobs}
+          <QueuePanel
+            summary={summary}
             bulkControl={bulkControl}
             bulkBusy={bulkBusy}
             open={mainView === "transfers" || preferences.queueOpen}
@@ -1188,7 +1185,7 @@ export default function App() {
         <span>
           {active ? `${active} active transfers` : "No active transfers"}
           <span className="status-separator">/</span>
-          {bytes(jobs.reduce((s, j) => s + j.bytes_done, 0))} confirmed
+          {bytes(summary.bytes_done)} confirmed
           <span className="status-separator">/</span>
           <LockKeyhole size={10} /> Credentials in OS keychain
         </span>
@@ -1335,38 +1332,6 @@ export default function App() {
       )}
       {prompt && (
         <ActionPrompt prompt={prompt} onClose={() => setPrompt(undefined)} />
-      )}
-      {uploads.phase === "confirming" && uploads.plan && (
-        <UploadConflictDialog
-          key={uploads.plan.id}
-          plan={uploads.plan}
-          onResolve={uploads.resolve}
-          onCancel={() => void uploads.cancel()}
-        />
-      )}
-      {(uploads.phase === "checking" || uploads.phase === "queueing") && (
-        <Modal
-          title={
-            uploads.phase === "checking"
-              ? "Checking upload destinations…"
-              : "Adding uploads to the queue…"
-          }
-          description={
-            uploads.phase === "checking"
-              ? "Checking every file, including folder contents, for existing destinations."
-              : "Applying your choices. Transfer progress will appear in the queue."
-          }
-          onClose={() => void uploads.cancel()}
-          closeDisabled={uploads.phase === "queueing"}
-        >
-          <div className="form-actions">
-            {uploads.phase === "checking" && (
-              <Button onClick={() => void uploads.cancel()}>
-                Cancel upload
-              </Button>
-            )}
-          </div>
-        </Modal>
       )}
     </div>
   );

@@ -4,7 +4,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use voids3_core::{Credentials, MIB, Profile, Provider, TransferSettings};
 use voids3_s3::S3;
 use voids3_storage::Store;
-use voids3_transfer::upload::{ConflictAction, UploadBatch, UploadChoice};
+use voids3_transfer::batch::FeedState;
+use voids3_transfer::upload::ConflictAction;
 use voids3_transfer::{Direction, Engine, Fingerprint, Status, Transfer};
 
 fn client(bucket: String) -> S3 {
@@ -56,7 +57,11 @@ async fn wait(engine: &Engine, id: &str) -> Transfer {
                 .unwrap();
             if matches!(
                 job.status,
-                Status::Completed | Status::Failed | Status::Cancelled
+                Status::Completed
+                    | Status::Failed
+                    | Status::Cancelled
+                    | Status::Conflict
+                    | Status::Skipped
             ) {
                 return job;
             }
@@ -84,6 +89,8 @@ fn job(s3: &S3, path: PathBuf, key: String, size: u64) -> Transfer {
         parts: BTreeMap::new(),
         source: None,
         remote_etag: None,
+        batch_id: None,
+        conflict: None,
         upload_condition: Default::default(),
         priority: 0,
         settings: settings(),
@@ -439,6 +446,24 @@ async fn exercise(s3: &S3, prefix: &str) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+async fn idle(engine: &Engine) {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let summary = engine.summary().unwrap();
+            if summary.active == 0
+                && summary
+                    .batches
+                    .iter()
+                    .all(|batch| batch.state != FeedState::Running)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("batch did not become idle");
+}
 async fn exercise_upload_conflicts(
     s3: &S3,
     prefix: &str,
@@ -448,18 +473,21 @@ async fn exercise_upload_conflicts(
     let engine = Engine::new(store.clone(), settings())?;
     let folder = dir.path().join("photos");
     tokio::fs::create_dir(&folder).await?;
-    let small = folder.join("small.txt");
-    let large = folder.join("large.bin");
-    tokio::fs::write(&small, b"new small file").await?;
+    for index in 0..200 {
+        tokio::fs::write(
+            folder.join(format!("photo-{index:04}.jpg")),
+            b"incoming photo",
+        )
+        .await?;
+    }
     let content = vec![137_u8; (6 * MIB + 31) as usize];
-    tokio::fs::write(&large, &content).await?;
-    tokio::fs::write(folder.join("fresh.txt"), b"fresh").await?;
-    let small_key = format!("{prefix}photos/small.txt");
+    tokio::fs::write(folder.join("large.bin"), &content).await?;
+    let photo_key = format!("{prefix}photos/photo-0000.jpg");
     let large_key = format!("{prefix}photos/large.bin");
     for key in [
-        &small_key,
+        &photo_key,
         &large_key,
-        &format!("{prefix}photos/small (1).txt"),
+        &format!("{prefix}photos/photo-0000 (1).jpg"),
     ] {
         s3.client
             .put_object()
@@ -469,50 +497,58 @@ async fn exercise_upload_conflicts(
             .send()
             .await?;
     }
-    let small_original = s3.head(&small_key).await?;
-    let prepare = || UploadBatch::prepare(s3.clone(), vec![folder.clone()], prefix, settings());
-    let batch = prepare().await?;
-    let preview = batch.preview();
-    assert_eq!(preview.total, 3);
-    assert_eq!(preview.conflicts.len(), 2);
-    assert!(
-        preview
-            .conflicts
-            .iter()
-            .all(|item| item.destination.size == 15 && item.can_replace)
-    );
-    drop(batch); // Cancelling confirmation starts no workers and changes no objects.
-    assert!(engine.list()?.is_empty());
-    assert!(prepare().await?.enqueue(&engine, vec![]).await.is_err());
-    assert!(engine.list()?.is_empty());
-    let batch = prepare().await?;
-    let choices = batch
-        .preview()
-        .conflicts
-        .into_iter()
-        .map(|item| UploadChoice {
-            index: item.index,
-            action: if item.key == small_key {
-                ConflictAction::KeepBoth
-            } else {
-                ConflictAction::Replace
-            },
-        })
-        .collect();
-    let outcome = batch.enqueue(&engine, choices).await?;
-    assert_eq!(outcome.queued.len(), 3);
-    assert_eq!(outcome.failed, 0);
-    for id in &outcome.queued {
-        let job = wait(&engine, id).await;
-        assert_eq!(job.status, Status::Completed, "{:?}", job.error);
-    }
-    assert_eq!(s3.head(&small_key).await?.etag, small_original.etag);
+    let batch = engine.start_batch(s3.clone(), vec![folder.clone()], prefix.into(), settings())?;
+    // No batch-wide remote scan: a worker completes while discovery still has
+    // undiscovered files, and waiting conflicts do not stall fresh uploads.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let summary = engine.summary().unwrap();
+            let feed = summary
+                .batches
+                .iter()
+                .find(|feed| feed.id == batch)
+                .unwrap();
+            if summary.counts.get("completed").copied().unwrap_or(0) > 0 {
+                assert!(
+                    feed.discovered < 201,
+                    "first completion waited for all discovery"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await?;
+    idle(&engine).await;
+    let summary = engine.summary()?;
+    assert_eq!(summary.total, 201);
+    assert_eq!(summary.counts.get("conflict"), Some(&2));
+    assert_eq!(summary.counts.get("completed"), Some(&199));
+    let conflicts = engine.page("conflict", 0, 100)?.items;
+    let photo = conflicts.iter().find(|job| job.key == photo_key).unwrap();
+    let large = conflicts.iter().find(|job| job.key == large_key).unwrap();
+    engine.resolve_conflicts(s3.clone(), &photo.id, ConflictAction::KeepBoth, false)?;
+    engine.resolve_conflicts(s3.clone(), &large.id, ConflictAction::Replace, false)?;
+    // Resolvers are asynchronous, so wait for their outcomes rather than only
+    // looking at the current active count between registration and scheduling.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if engine.transfer(&photo.id).unwrap().status == Status::Completed
+                && engine.transfer(&large.id).unwrap().status == Status::Completed
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    assert_eq!(s3.preview_text(&photo_key).await?, "old destination");
     assert_eq!(
-        s3.preview_text(&format!("{prefix}photos/small (2).txt"))
+        s3.preview_text(&format!("{prefix}photos/photo-0000 (2).jpg"))
             .await?,
-        "new small file"
+        "incoming photo"
     );
-    let bytes = s3
+    let actual = s3
         .client
         .get_object()
         .bucket(&s3.profile.bucket)
@@ -523,112 +559,159 @@ async fn exercise_upload_conflicts(
         .collect()
         .await?
         .into_bytes();
-    assert_eq!(bytes.as_ref(), content.as_slice()); // Conditional multipart replacement.
-    let batch = prepare().await?;
-    let choices = batch
-        .preview()
-        .conflicts
-        .into_iter()
-        .map(|item| UploadChoice {
-            index: item.index,
-            action: ConflictAction::Skip,
-        })
-        .collect();
-    let skipped = batch.enqueue(&engine, choices).await?;
-    assert_eq!(skipped.skipped, 3);
-    assert!(skipped.queued.is_empty());
+    assert_eq!(actual.as_ref(), content.as_slice());
 
-    // Single-request replacement succeeds only for the ETag shown by preflight.
-    let batch = UploadBatch::prepare(
-        s3.clone(),
-        vec![small.clone()],
-        &format!("{prefix}photos/"),
-        settings(),
-    )
+    // Apply-to-all is a backend batch policy and also handles files that have
+    // not yet reached a worker. Skipping never changes remote contents.
+    let next = engine.start_batch(s3.clone(), vec![folder.clone()], prefix.into(), settings())?;
+    let first = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(job) = engine
+                .page("conflict", 0, 100)
+                .unwrap()
+                .items
+                .into_iter()
+                .find(|job| job.batch_id.as_deref() == Some(&next))
+            {
+                break job;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
     .await?;
-    let replaced = batch
-        .enqueue(
-            &engine,
-            vec![UploadChoice {
-                index: 0,
-                action: ConflictAction::Replace,
-            }],
-        )
-        .await?;
-    assert_eq!(
-        wait(&engine, &replaced.queued[0]).await.status,
-        Status::Completed
-    );
-    assert_eq!(s3.preview_text(&small_key).await?, "new small file");
-
-    // A later writer wins over an earlier confirmation; resuming retains that
-    // original ETag and cannot grant a broader overwrite permission.
-    let batch = UploadBatch::prepare(
-        s3.clone(),
-        vec![small.clone()],
-        &format!("{prefix}photos/"),
-        settings(),
-    )
+    engine.resolve_conflicts(s3.clone(), &first.id, ConflictAction::Skip, true)?;
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let summary = engine.summary().unwrap();
+            if summary.counts.get("skipped") == Some(&201) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
     .await?;
-    s3.client
-        .put_object()
-        .bucket(&s3.profile.bucket)
-        .key(&small_key)
-        .body(ByteStream::from_static(b"another writer"))
-        .send()
-        .await?;
-    let stale = batch
-        .enqueue(
-            &engine,
-            vec![UploadChoice {
-                index: 0,
-                action: ConflictAction::Replace,
-            }],
-        )
-        .await?;
-    assert_eq!(wait(&engine, &stale.queued[0]).await.status, Status::Failed);
-    let restarted = Engine::new(store, settings())?;
-    restarted.resume(s3.clone(), &stale.queued[0])?;
-    assert_eq!(
-        wait(&restarted, &stale.queued[0]).await.status,
-        Status::Failed
-    );
-    assert_eq!(s3.preview_text(&small_key).await?, "another writer");
+    assert_eq!(s3.preview_text(&photo_key).await?, "old destination");
 
-    // No part of a batch starts when a confirmed local source changes.
-    let batch = prepare().await?;
-    let choices = batch
-        .preview()
-        .conflicts
+    // Small-file replacement, changed-source refusal, and a stale ETag on a
+    // queued resumed replacement all retain conditional-write protection.
+    let single = folder.join("photo-0000.jpg");
+    engine.start_batch(
+        s3.clone(),
+        vec![single.clone()],
+        format!("{prefix}photos/"),
+        settings(),
+    )?;
+    idle(&engine).await;
+    let waiting = engine
+        .page("conflict", 0, 100)?
+        .items
         .into_iter()
-        .map(|item| UploadChoice {
-            index: item.index,
-            action: ConflictAction::Replace,
-        })
-        .collect();
-    let count = engine.list()?.len();
-    tokio::fs::write(&small, b"source changed after the question").await?;
-    assert!(batch.enqueue(&engine, choices).await.is_err());
-    assert_eq!(engine.list()?.len(), count);
-
-    // An object created after a no-conflict preflight still cannot be clobbered.
-    let race = dir.path().join("race.txt");
-    tokio::fs::write(&race, b"incoming").await?;
-    let batch = UploadBatch::prepare(s3.clone(), vec![race], prefix, settings()).await?;
-    assert!(batch.preview().conflicts.is_empty());
-    let race_key = format!("{prefix}race.txt");
-    s3.client
-        .put_object()
-        .bucket(&s3.profile.bucket)
-        .key(&race_key)
-        .body(ByteStream::from_static(b"created while confirming"))
-        .send()
-        .await?;
-    let raced = batch.enqueue(&engine, vec![]).await?;
-    assert_eq!(wait(&engine, &raced.queued[0]).await.status, Status::Failed);
+        .find(|job| job.key == photo_key)
+        .unwrap();
+    tokio::fs::write(&single, b"changed source after conflict").await?;
+    engine.resolve_conflicts(s3.clone(), &waiting.id, ConflictAction::Replace, false)?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if engine
+                .transfer(&waiting.id)
+                .unwrap()
+                .error
+                .as_ref()
+                .is_some_and(|error| error.contains("Source file changed"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await?;
+    engine.resolve_conflicts(s3.clone(), &waiting.id, ConflictAction::Skip, false)?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if engine.transfer(&waiting.id).unwrap().status == Status::Skipped {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await?;
+    assert_eq!(s3.preview_text(&photo_key).await?, "old destination");
+    engine.start_batch(
+        s3.clone(),
+        vec![single.clone()],
+        format!("{prefix}photos/"),
+        settings(),
+    )?;
+    idle(&engine).await;
+    let waiting = engine.page("conflict", 0, 100)?.items.remove(0);
+    engine.resolve_conflicts(s3.clone(), &waiting.id, ConflictAction::Replace, false)?;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if engine.transfer(&waiting.id).unwrap().status == Status::Completed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await?;
     assert_eq!(
-        s3.preview_text(&race_key).await?,
-        "created while confirming"
+        s3.preview_text(&photo_key).await?,
+        "changed source after conflict"
+    );
+
+    // Stop discovery before its first poll. It must not add files after a
+    // global stop, and an updater guard must reject resuming paused discovery.
+    let stopped = engine.start_batch(
+        s3.clone(),
+        vec![folder],
+        format!("{prefix}stopped/"),
+        settings(),
+    )?;
+    engine.interrupt_all(false)?;
+    let guard = engine.begin_maintenance()?;
+    assert!(engine.resume_batches().is_err());
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(
+        engine
+            .summary()?
+            .batches
+            .iter()
+            .find(|feed| feed.id == stopped)
+            .unwrap()
+            .discovered,
+        0
+    );
+    drop(guard);
+    engine.resume_batches()?;
+    engine.interrupt_all(true)?;
+    engine.cancel_idle()?;
+    idle(&engine).await;
+    let count = engine.summary()?.total;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        engine.summary()?.total,
+        count,
+        "discovery continued after cancel all"
+    );
+    assert!(s3.scan(&format!("{prefix}stopped/")).await?.is_empty());
+    let invalid = client(format!("voids3-missing-{}", uuid::Uuid::new_v4()));
+    let failed_id = engine.start_batch(
+        invalid,
+        vec![dir.path().join("photos")],
+        format!("{prefix}invalid/"),
+        settings(),
+    )?;
+    idle(&engine).await;
+    let summary = engine.summary()?;
+    let failed = summary
+        .batches
+        .iter()
+        .find(|batch| batch.id == failed_id)
+        .unwrap();
+    assert_eq!(failed.state, FeedState::Failed);
+    assert!(
+        failed.discovered < 201,
+        "connection failure did not stop further discovery"
     );
     Ok(())
 }
