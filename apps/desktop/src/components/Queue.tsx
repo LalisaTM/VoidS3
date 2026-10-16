@@ -257,24 +257,26 @@ export function Queue({
       </div>
       {open && (
         <div id="transfer-queue-content" className="queue-content">
-          {summary?.batches
-            .filter(
-              (batch) =>
-                batch.state !== "finished" && batch.state !== "cancelled",
-            )
-            .map((batch) => (
-              <div className="batch-progress" key={batch.id} role="status">
-                <span>
-                  {batch.state === "running"
-                    ? "Discovering upload files…"
-                    : `Upload discovery ${batch.state}`}{" "}
-                  · {batch.discovered.toLocaleString()} queued
-                </span>
-                {batch.error && (
-                  <span className="transfer-error">{batch.error}</span>
-                )}
-              </div>
-            ))}
+          <div className="queue-batches">
+            {summary?.batches
+              .filter(
+                (batch) =>
+                  batch.state !== "finished" && batch.state !== "cancelled",
+              )
+              .map((batch) => (
+                <div className="batch-progress" key={batch.id} role="status">
+                  <span>
+                    {batch.state === "running"
+                      ? "Discovering upload files…"
+                      : `Upload discovery ${batch.state}`}{" "}
+                    · {batch.discovered.toLocaleString()} queued
+                  </span>
+                  {batch.error && (
+                    <span className="transfer-error">{batch.error}</span>
+                  )}
+                </div>
+              ))}
+          </div>
           {!!summary?.counts.conflict && (
             <button
               className="conflict-notice"
