@@ -10,7 +10,12 @@ import {
   RotateCw,
   X,
 } from "lucide-react";
-import { bytes, type Transfer, type BatchOperation } from "../lib/api";
+import {
+  bytes,
+  type Transfer,
+  type QueueSummary,
+  type BatchOperation,
+} from "../lib/api";
 import { Button } from "./ui/button";
 export function Queue({
   jobs,
@@ -20,8 +25,23 @@ export function Queue({
   clear,
   bulkControl,
   bulkBusy = false,
+  summary,
+  filter,
+  onFilter,
+  pagination,
+  resolve,
 }: {
   jobs: Transfer[];
+  summary?: QueueSummary;
+  filter?: string;
+  onFilter?: (filter: string) => void;
+  pagination?: {
+    offset: number;
+    total: number;
+    previous: () => void;
+    next: () => void;
+  };
+  resolve?: (job: Transfer) => void;
   open: boolean;
   toggle: () => void;
   control: (id: string, operation: string) => void;
@@ -29,9 +49,12 @@ export function Queue({
   bulkControl?: (operation: BatchOperation) => void;
   bulkBusy?: boolean;
 }) {
-  const [tab, setTab] = useState("all");
+  const [localTab, setLocalTab] = useState("all");
+  const tab = filter ?? localTab;
+  const setTab = onFilter ?? setLocalTab;
   const [samples, setSamples] = useState<{ time: number; value: number }[]>([]);
-  const total = jobs.reduce((sum, j) => sum + j.bytes_done, 0);
+  const total =
+    summary?.bytes_done ?? jobs.reduce((sum, j) => sum + j.bytes_done, 0);
   useEffect(() => {
     const sample = () =>
       setSamples((old) => [
@@ -52,11 +75,18 @@ export function Queue({
             Math.max((last.time - first.time) / 1000, 0.01),
         )
       : 0;
-  const active = jobs.filter((j) =>
-    ["queued", "preparing", "uploading", "downloading", "verifying"].includes(
-      j.status,
-    ),
-  ).length;
+  const active =
+    (summary?.active ??
+      jobs.filter((j) =>
+        [
+          "queued",
+          "preparing",
+          "uploading",
+          "downloading",
+          "verifying",
+        ].includes(j.status),
+      ).length) +
+    (summary?.batches.filter((batch) => batch.state === "running").length ?? 0);
   const filtered = jobs.filter(
     (j) =>
       tab === "all" ||
@@ -101,6 +131,19 @@ export function Queue({
           {open ? <ChevronDown size={15} /> : <ChevronUp size={15} />} Transfer
           queue <span className="count">{active}</span>
         </button>
+        {!!summary?.counts.conflict && (
+          <Button
+            size="small"
+            variant="ghost"
+            className="queue-conflict-badge"
+            onClick={() => {
+              setTab("conflict");
+              if (!open) toggle();
+            }}
+          >
+            Review {summary.counts.conflict.toLocaleString()} conflicts
+          </Button>
+        )}
         {bulkControl && (
           <div
             className="queue-bulk-actions"
@@ -118,7 +161,11 @@ export function Queue({
               variant="ghost"
               size="small"
               disabled={
-                bulkBusy || !jobs.some((job) => job.status === "paused")
+                bulkBusy ||
+                !(summary
+                  ? summary.counts.paused ||
+                    summary.batches.some((batch) => batch.state === "paused")
+                  : jobs.some((job) => job.status === "paused"))
               }
               onClick={() => bulkControl("resume")}
             >
@@ -130,13 +177,18 @@ export function Queue({
               className="cancel-all"
               disabled={
                 bulkBusy ||
-                !jobs.some(
-                  (job) =>
-                    job.status !== "completed" &&
-                    (job.status !== "cancelled" ||
-                      !!job.upload_id ||
-                      !!job.error),
-                )
+                !(summary
+                  ? summary.cancellable ||
+                    summary.batches.some((batch) =>
+                      ["running", "paused"].includes(batch.state),
+                    )
+                  : jobs.some(
+                      (job) =>
+                        job.status !== "completed" &&
+                        (job.status !== "cancelled" ||
+                          !!job.upload_id ||
+                          !!job.error),
+                    ))
               }
               onClick={() => bulkControl("cancel")}
             >
@@ -151,10 +203,19 @@ export function Queue({
             value={tab}
             onChange={(e) => setTab(e.target.value)}
           >
-            {["all", "active", "completed", "failed", "paused"].map((value) => (
+            {[
+              "all",
+              "active",
+              "conflict",
+              "completed",
+              "failed",
+              "paused",
+              "skipped",
+              "cancelled",
+            ].map((value) => (
               <option key={value} value={value}>
                 {value === "all"
-                  ? `All (${jobs.length})`
+                  ? `All (${summary?.total ?? jobs.length})`
                   : value.charAt(0).toUpperCase() + value.slice(1)}
               </option>
             ))}
@@ -181,11 +242,13 @@ export function Queue({
           size="small"
           className="clear-finished"
           disabled={
-            !jobs.some(
-              (j) =>
-                j.status === "completed" ||
-                (j.status === "cancelled" && !j.upload_id && !j.error),
-            )
+            !(summary
+              ? summary.clearable
+              : jobs.some(
+                  (j) =>
+                    j.status === "completed" ||
+                    (j.status === "cancelled" && !j.upload_id && !j.error),
+                ))
           }
           onClick={clear}
         >
@@ -194,13 +257,40 @@ export function Queue({
       </div>
       {open && (
         <div id="transfer-queue-content" className="queue-content">
+          {summary?.batches
+            .filter(
+              (batch) =>
+                batch.state !== "finished" && batch.state !== "cancelled",
+            )
+            .map((batch) => (
+              <div className="batch-progress" key={batch.id} role="status">
+                <span>
+                  {batch.state === "running"
+                    ? "Discovering upload files…"
+                    : `Upload discovery ${batch.state}`}{" "}
+                  · {batch.discovered.toLocaleString()} queued
+                </span>
+                {batch.error && (
+                  <span className="transfer-error">{batch.error}</span>
+                )}
+              </div>
+            ))}
+          {!!summary?.counts.conflict && (
+            <button
+              className="conflict-notice"
+              onClick={() => setTab("conflict")}
+            >
+              {summary.counts.conflict.toLocaleString()} file(s) need a decision
+              — review conflicts
+            </button>
+          )}
           <div className="queue-list">
             {!filtered.length ? (
               <div className="queue-empty">
                 <div>
                   <Check size={18} />
                   <span>
-                    {jobs.length
+                    {(summary?.total ?? jobs.length)
                       ? "No transfers in this view"
                       : "No transfers queued"}
                   </span>
@@ -260,6 +350,11 @@ export function Queue({
                     </span>
                   </div>
                   <div className="transfer-actions">
+                    {job.status === "conflict" && resolve && (
+                      <Button size="small" onClick={() => resolve(job)}>
+                        Resolve
+                      </Button>
+                    )}
                     {[
                       "queued",
                       "preparing",
@@ -306,6 +401,29 @@ export function Queue({
               ))
             )}
           </div>
+          {pagination && pagination.total > 0 && (
+            <div className="queue-pagination">
+              <span>
+                {pagination.offset + 1}–
+                {Math.min(pagination.offset + 100, pagination.total)} of{" "}
+                {pagination.total.toLocaleString()} in this view
+              </span>
+              <Button
+                size="small"
+                disabled={!pagination.offset}
+                onClick={pagination.previous}
+              >
+                Previous page
+              </Button>
+              <Button
+                size="small"
+                disabled={pagination.offset + 100 >= pagination.total}
+                onClick={pagination.next}
+              >
+                Next page
+              </Button>
+            </div>
+          )}
         </div>
       )}
     </section>

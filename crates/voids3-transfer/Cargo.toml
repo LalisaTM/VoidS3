@@ -17,6 +17,7 @@ uuid.workspace = true
 futures.workspace = true
 tracing.workspace = true
 mime_guess = "2"
+walkdir = "2"
 
 [dev-dependencies]
 tempfile.workspace = true

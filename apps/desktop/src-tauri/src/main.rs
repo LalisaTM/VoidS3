@@ -78,24 +78,28 @@ enum Request {
         paths: Vec<PathBuf>,
         prefix: String,
     },
-    PrepareUpload {
-        id: String,
-        paths: Vec<PathBuf>,
-        prefix: String,
-    },
-    CommitUpload {
-        id: String,
-        choices: Vec<voids3_transfer::upload::UploadChoice>,
-    },
-    DiscardUpload {
-        id: String,
-    },
     Download {
         id: String,
         keys: Vec<String>,
         directory: PathBuf,
     },
     Transfers,
+    StartUpload {
+        id: String,
+        paths: Vec<PathBuf>,
+        prefix: String,
+    },
+    ResolveUpload {
+        id: String,
+        decision: voids3_transfer::upload::ConflictAction,
+        all: bool,
+    },
+    TransferSummary,
+    TransferPage {
+        filter: String,
+        offset: usize,
+        limit: usize,
+    },
     TransferControl {
         id: String,
         operation: Control,
@@ -105,6 +109,7 @@ enum Request {
     },
     ClearFinished,
     Settings,
+    TransferPresets,
     SaveSettings {
         settings: TransferSettings,
     },
@@ -200,20 +205,27 @@ async fn execute(app: Arc<App>, request: Request) -> Result<Value> {
             app.client(&id).await?.presign(&key, false, seconds).await?
         )),
         Request::Upload { id, paths, prefix } => Ok(json!(app.upload(&id, paths, &prefix).await?)),
-        Request::PrepareUpload { id, paths, prefix } => {
-            Ok(json!(app.prepare_upload(&id, paths, &prefix).await?))
-        }
-        Request::CommitUpload { id, choices } => Ok(json!(app.commit_upload(&id, choices).await?)),
-        Request::DiscardUpload { id } => {
-            app.discard_upload(&id)?;
-            Ok(Value::Null)
-        }
         Request::Download {
             id,
             keys,
             directory,
         } => Ok(json!(app.download(&id, keys, directory).await?)),
         Request::Transfers => Ok(json!(app.engine.list()?)),
+        Request::StartUpload { id, paths, prefix } => {
+            Ok(json!(app.start_upload(&id, paths, prefix).await?))
+        }
+        Request::ResolveUpload { id, decision, all } => {
+            app.resolve_upload(&id, decision, all).await?;
+            Ok(Value::Null)
+        }
+        Request::TransferSummary => Ok(json!(blocking(move || app.engine.summary()).await?)),
+        Request::TransferPage {
+            filter,
+            offset,
+            limit,
+        } => Ok(json!(
+            blocking(move || app.engine.page(&filter, offset, limit)).await?
+        )),
         Request::TransferControl { id, operation } => {
             if matches!(operation, Control::Cancel) && app.engine.request_cancel(&id)? {
                 return Ok(Value::Null);
@@ -221,28 +233,26 @@ async fn execute(app: Arc<App>, request: Request) -> Result<Value> {
             match operation {
                 Control::Pause => app.engine.pause(&id)?,
                 Control::Resume | Control::Cancel => {
-                    let job = app
-                        .engine
-                        .list()?
-                        .into_iter()
-                        .find(|j| j.id == id)
-                        .ok_or_else(|| Error::Invalid("Transfer not found".into()))?;
+                    let job = app.engine.transfer(&id)?;
                     let client = app.client(&job.profile_id).await?;
-                    match operation {
-                        Control::Resume => app.engine.resume(client, &id)?,
-                        Control::Cancel => app.engine.cancel(client, &id)?,
-                        Control::Pause => {}
-                    }
+                    let engine = app.engine.clone();
+                    blocking(move || match operation {
+                        Control::Resume => engine.resume(client, &id),
+                        Control::Cancel => engine.cancel(client, &id),
+                        Control::Pause => Ok(()),
+                    })
+                    .await?;
                 }
             };
             Ok(Value::Null)
         }
         Request::TransferControlAll { operation } => Ok(json!(app.control_all(operation).await?)),
         Request::ClearFinished => {
-            app.engine.clear_finished()?;
+            blocking(move || app.engine.clear_finished()).await?;
             Ok(Value::Null)
         }
         Request::Settings => Ok(json!(app.settings()?)),
+        Request::TransferPresets => Ok(json!(voids3_core::transfer_presets())),
         Request::SaveSettings { settings } => {
             app.save_settings(settings)?;
             Ok(Value::Null)

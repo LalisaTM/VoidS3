@@ -40,6 +40,23 @@ impl Store {
         json.map(|j| serde_json::from_str(&j).map_err(storage))
             .transpose()
     }
+    pub fn put_many<T: Serialize>(&self, namespace: &str, values: &[(String, T)]) -> Result<()> {
+        let mut db = self.db.lock().map_err(storage)?;
+        let transaction = db.transaction().map_err(storage)?;
+        {
+            let mut statement = transaction.prepare_cached("INSERT INTO documents(namespace,id,value) VALUES (?1,?2,?3) ON CONFLICT(namespace,id) DO UPDATE SET value=excluded.value").map_err(storage)?;
+            for (id, value) in values {
+                statement
+                    .execute(params![
+                        namespace,
+                        id,
+                        serde_json::to_string(value).map_err(storage)?
+                    ])
+                    .map_err(storage)?;
+            }
+        }
+        transaction.commit().map_err(storage)
+    }
     pub fn list<T: DeserializeOwned>(&self, namespace: &str) -> Result<Vec<T>> {
         let db = self.db.lock().map_err(storage)?;
         let mut statement = db
@@ -61,6 +78,19 @@ impl Store {
             )
             .map_err(storage)?;
         Ok(())
+    }
+    pub fn delete_many(&self, namespace: &str, ids: &[String]) -> Result<()> {
+        let mut db = self.db.lock().map_err(storage)?;
+        let transaction = db.transaction().map_err(storage)?;
+        {
+            let mut statement = transaction
+                .prepare_cached("DELETE FROM documents WHERE namespace=?1 AND id=?2")
+                .map_err(storage)?;
+            for id in ids {
+                statement.execute(params![namespace, id]).map_err(storage)?;
+            }
+        }
+        transaction.commit().map_err(storage)
     }
     pub fn profiles(&self) -> Result<Vec<Profile>> {
         self.list("profiles")

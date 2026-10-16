@@ -2073,3 +2073,33 @@ progress::-webkit-progress-value {
     display: none;
   }
 }
+
+.queue-pagination,
+.batch-progress,
+.conflict-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11px;
+}
+.queue-pagination > span {
+  margin-right: auto;
+  color: var(--muted);
+}
+.batch-progress {
+  color: var(--muted);
+}
+.conflict-notice {
+  color: var(--warning);
+  background: var(--raised);
+  text-align: left;
+}
+.transfer-status.conflict {
+  color: var(--warning);
+}
+.transfer-status.skipped {
+  color: var(--muted);
+}

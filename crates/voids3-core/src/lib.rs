@@ -19,6 +19,8 @@ pub enum Error {
     Provider(String),
     #[error("Conflict: {0}")]
     Conflict(String),
+    #[error("Upload destination changed during the write")]
+    DestinationChanged,
     #[error("Transfer paused")]
     Paused,
     #[error("Transfer cancelled")]
@@ -137,7 +139,7 @@ pub struct Page {
     pub next_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferSettings {
     pub concurrent_files: usize,
     pub concurrent_parts: usize,
@@ -145,6 +147,24 @@ pub struct TransferSettings {
     pub part_size: u64,
     pub multipart_threshold: u64,
     pub retries: u32,
+}
+#[derive(Serialize)]
+pub struct TransferPreset {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub settings: TransferSettings,
+}
+pub fn transfer_presets() -> Vec<TransferPreset> {
+    [
+        ("balanced", "Balanced", "A conservative starting point for mixed files and typical connections.", 2, 3, 6, 16, 32, 3),
+        ("many_small", "Many small files", "More files in parallel for image collections and document folders. Uses more requests.", 12, 2, 16, 8, 64, 3),
+        ("large_files", "Large files", "Fewer files with more multipart requests per file, for archives and video.", 2, 8, 16, 32, 32, 3),
+        ("gentle", "Low impact", "Keeps disk and network pressure low while you work.", 1, 1, 2, 8, 32, 3),
+        ("unreliable", "Unreliable connection", "Lower concurrency, smaller parts and more retries for intermittent connections.", 2, 2, 4, 8, 16, 6),
+    ].into_iter().map(|(id,name,description,files,parts,requests,size,threshold,retries)| TransferPreset {
+        id, name, description, settings: TransferSettings { concurrent_files: files, concurrent_parts: parts, max_requests: requests, part_size: size*MIB, multipart_threshold: threshold*MIB, retries }
+    }).collect()
 }
 impl Default for TransferSettings {
     fn default() -> Self {
@@ -225,6 +245,18 @@ pub fn safe_relative_key(key: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transfer_presets_are_valid_and_balanced_matches_defaults() {
+        let presets = transfer_presets();
+        assert_eq!(presets.len(), 5);
+        for preset in &presets {
+            preset.settings.validate().unwrap();
+        }
+        assert_eq!(presets[0].settings, TransferSettings::default());
+        assert!(presets[1].settings.concurrent_files > presets[0].settings.concurrent_files);
+        assert!(presets[2].settings.concurrent_parts > presets[0].settings.concurrent_parts);
+        assert!(presets[4].settings.retries > presets[0].settings.retries);
+    }
     #[test]
     fn multipart_limits() {
         assert_eq!(part_size(0, 1).unwrap(), 5 * MIB);

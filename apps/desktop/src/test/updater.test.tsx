@@ -149,9 +149,15 @@ describe("GitHub release updater", () => {
     ).toBe(true);
   });
   it("keeps Settings open and prevents saving while the installer operation is running", async () => {
-    mockedInvoke.mockImplementation(async (command) => {
+    mockedInvoke.mockImplementation(async (command, args) => {
       if (command === "check_for_updates") return available;
       if (command === "install_update") return new Promise(() => {});
+      if (
+        command === "dispatch" &&
+        (args as { request: { action: string } }).request.action ===
+          "transfer_presets"
+      )
+        return [];
       if (command === "dispatch")
         return {
           concurrent_files: 2,
