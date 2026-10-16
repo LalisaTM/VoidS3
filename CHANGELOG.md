@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-10-16
+
+- Ask how to handle existing upload destinations, with Replace, Skip, Keep both, sizes/timestamps, batch-scoped Apply to all, and whole-batch cancellation.
+- Check recursive folder, picker, selection, and drag/drop uploads before queueing. Allocate unused numbered names for Keep both.
+- Persist conditional replacement ETags across pause/restart, protect single and multipart completion against changed destinations, and retain no-overwrite defaults for existing jobs, CLI uploads, and additions-only sync.
+- Add frontend regression tests and real HTTP S3 tests for conflict decisions, replacements, changed sources/destinations, and recovery.
+
 ## 0.2.0 — 2026-10-15
 
 - Add a signed GitHub Releases self-updater for Windows x64, optional startup/daily checks, release notes, verified download progress, explicit installation confirmation, and a queue-idle installation guard.

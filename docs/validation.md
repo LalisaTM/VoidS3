@@ -1,5 +1,13 @@
 # Validation evidence
 
+Upload-conflict update validated on Windows x64, 2026-10-16:
+
+- Thirty-seven frontend tests pass, including mixed and apply-to-all choices, cancellation/Escape, missing ETags, immediate conflict-free enqueue, cancelled in-flight preflight, fresh confirmation after failure, and the actual workspace upload entry point.
+- Twenty Rust unit tests and workspace/doc-test targets pass. The real HTTP Moto suite additionally verifies folder preflight, whole-batch cancellation, missing decisions, Keep both name collisions, Skip, exact single/multipart replacement content, stale destination refusal after restart, changed-source refusal before any enqueue, and objects created after preflight.
+- Strict TypeScript/Vite build, ESLint, Clippy with warnings denied, formatting and version consistency checks pass.
+- Collaborative browser DOM checks on a synthetic long-path/Unicode conflict fixture confirm no horizontal overflow at 1280px and 390px, readable stacked comparisons on narrow screens, and initial focus on Skip. Screenshot capture failed in the preview client; no screenshot-based or native desktop visual verification is claimed. The temporary fixture was removed.
+- Live cloud and installed-app checks remain unverified as described below.
+
 Local Windows x64 validation on 2026-10-15:
 
 - Rust backend/CLI and Tauri desktop compile with stable Rust 1.99.0.

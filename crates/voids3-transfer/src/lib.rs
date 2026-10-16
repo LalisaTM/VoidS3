@@ -1,4 +1,5 @@
 //! Persistent transfer engine shared by desktop and CLI. Files never cross IPC.
+pub mod upload;
 use aws_sdk_s3::{
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart},
@@ -52,8 +53,8 @@ impl Status {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fingerprint {
-    size: u64,
-    modified_nanos: u128,
+    pub size: u64,
+    pub modified_nanos: u128,
 }
 impl Fingerprint {
     pub async fn read(path: &Path) -> Result<Self> {
@@ -75,6 +76,19 @@ impl Fingerprint {
         })
     }
 }
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum UploadCondition {
+    #[default]
+    Create,
+    Replace {
+        etag: String,
+    },
+}
+pub struct UploadIntent {
+    pub source: Fingerprint,
+    pub condition: UploadCondition,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transfer {
     pub id: String,
@@ -93,6 +107,8 @@ pub struct Transfer {
     pub parts: BTreeMap<i32, String>,
     pub source: Option<Fingerprint>,
     pub remote_etag: Option<String>,
+    #[serde(default)]
+    pub upload_condition: UploadCondition,
     pub priority: i32,
     pub settings: TransferSettings,
 }
@@ -175,6 +191,29 @@ impl Engine {
         key: String,
         settings: TransferSettings,
     ) -> Result<String> {
+        self.enqueue_with_intent(s3, direction, local, key, settings, None)
+            .await
+    }
+    pub async fn enqueue_upload(
+        self: &Arc<Self>,
+        s3: S3,
+        local: PathBuf,
+        key: String,
+        settings: TransferSettings,
+        intent: UploadIntent,
+    ) -> Result<String> {
+        self.enqueue_with_intent(s3, Direction::Upload, local, key, settings, Some(intent))
+            .await
+    }
+    async fn enqueue_with_intent(
+        self: &Arc<Self>,
+        s3: S3,
+        direction: Direction,
+        local: PathBuf,
+        key: String,
+        settings: TransferSettings,
+        intent: Option<UploadIntent>,
+    ) -> Result<String> {
         settings.validate()?;
         if key.is_empty() || key.ends_with('/') {
             return Err(Error::Invalid("Select a file object, not a folder".into()));
@@ -183,6 +222,20 @@ impl Engine {
             Direction::Upload => {
                 s3.profile.writable()?;
                 let source = Fingerprint::read(&local).await?;
+                if let Some(intent) = &intent {
+                    if intent.source != source {
+                        return Err(Error::Conflict(
+                            "Source changed since upload confirmation. Upload again to review it."
+                                .into(),
+                        ));
+                    }
+                    if matches!(&intent.condition, UploadCondition::Replace { etag } if etag.is_empty())
+                    {
+                        return Err(Error::Invalid(
+                            "Replacement requires the confirmed destination ETag".into(),
+                        ));
+                    }
+                }
                 (source.size, Some(source), None)
             }
             Direction::Download => {
@@ -234,6 +287,7 @@ impl Engine {
             parts: BTreeMap::new(),
             source,
             remote_etag: etag,
+            upload_condition: intent.map(|intent| intent.condition).unwrap_or_default(),
             priority: 0,
             settings,
         };
@@ -484,6 +538,25 @@ impl Engine {
     async fn upload(&self, s3: &S3, job: &mut Transfer, control: &Control) -> Result<()> {
         s3.profile.writable()?;
         self.validate_source(job).await?;
+        {
+            let _permit = self.request(control).await?;
+            let existing = tokio::select! { biased;
+                _ = control.token.cancelled() => return Err(Error::Paused),
+                result = s3.head_optional(&job.key) => result?
+            };
+            let matches = match (&job.upload_condition, existing) {
+                (UploadCondition::Create, None) => true,
+                (UploadCondition::Replace { etag }, Some(info)) => *etag == info.etag,
+                _ => false,
+            };
+            if !matches {
+                return Err(Error::Conflict("Upload destination exists or changed since confirmation. Upload again to review Replace, Skip or Keep both.".into()));
+            }
+        }
+        let (if_match, if_none_match) = match &job.upload_condition {
+            UploadCondition::Create => (None, Some("*".to_owned())),
+            UploadCondition::Replace { etag } => (Some(etag.clone()), None),
+        };
         job.status = Status::Uploading;
         self.save(job)?;
         if job.size < job.settings.multipart_threshold {
@@ -493,7 +566,8 @@ impl Engine {
                 .map_err(|_| Error::Invalid("Cannot open upload source".into()))?;
             tokio::select! { biased;
                 _ = control.token.cancelled() => return Err(Error::Paused),
-                result = s3.client.put_object().bucket(&s3.profile.bucket).key(&job.key).if_none_match("*")
+                result = s3.client.put_object().bucket(&s3.profile.bucket).key(&job.key)
+                    .set_if_match(if_match).set_if_none_match(if_none_match)
                     .content_type(mime_guess::from_path(&job.local_path).first_or_octet_stream().as_ref()).body(body).send() => {
                     result.map_err(|e| api_error("Upload", e.as_service_error().and_then(|s| s.meta().code())))?;
                 }
@@ -642,13 +716,14 @@ impl Engine {
                     .build()
             })
             .collect();
-        // Atomic no-clobber completion. Never overwrite an object that appeared during upload.
+        // Evaluate the confirmed destination version atomically at completion.
         s3.client
             .complete_multipart_upload()
             .bucket(&s3.profile.bucket)
             .key(&job.key)
             .upload_id(&upload_id)
-            .if_none_match("*")
+            .set_if_match(if_match)
+            .set_if_none_match(if_none_match)
             .multipart_upload(
                 CompletedMultipartUpload::builder()
                     .set_parts(Some(parts))
@@ -815,6 +890,7 @@ mod tests {
             parts: BTreeMap::new(),
             source: None,
             remote_etag: Some("test-etag".into()),
+            upload_condition: UploadCondition::default(),
             priority: 0,
             settings: TransferSettings::default(),
         };

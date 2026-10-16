@@ -2001,3 +2001,75 @@ progress::-webkit-progress-value {
     margin-left: auto;
   }
 }
+.upload-conflict {
+  display: grid;
+  gap: 16px;
+  padding: 0 22px 22px;
+}
+.conflict-key {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.conflict-comparison {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  border-block: 1px solid var(--line);
+  padding-block: 18px;
+}
+.conflict-comparison section {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+.conflict-comparison h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 12px;
+}
+.conflict-path {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+}
+.conflict-comparison span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.conflict-apply {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.conflict-apply input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  flex: none;
+}
+.conflict-actions,
+.conflict-actions > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.conflict-actions {
+  justify-content: space-between;
+  padding-top: 4px;
+}
+@media (max-width: 520px) {
+  .conflict-comparison {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .conflict-comparison > svg {
+    display: none;
+  }
+}

@@ -7,6 +7,8 @@ import {
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useFileDragDrop } from "./lib/useFileDragDrop";
 import { useUpdater } from "./lib/useUpdater";
+import { useUpload } from "./lib/useUpload";
+import { UploadConflictDialog } from "./components/UploadConflictDialog";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -115,6 +117,20 @@ export default function App() {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const uploads = useUpload({
+    onComplete: (result) => {
+      preferences.set({ queueOpen: true });
+      setNotice(
+        `${result.queued.length} file(s) queued, ${result.skipped} skipped.`,
+      );
+      if (result.failed)
+        setError(
+          `${result.failed} file(s) could not be queued. ${result.errors.join(" · ")}`,
+        );
+      void query.invalidateQueries({ queryKey: ["transfers"] });
+    },
+    onError: setError,
+  });
   const [prompt, setPrompt] = useState<Prompt>();
   const [localSelection, setLocalSelection] = useState<string[]>([]);
   const [remoteSelection, setRemoteSelection] = useState<string[]>([]);
@@ -207,12 +223,11 @@ export default function App() {
         title: folder ? "Select folder to upload" : "Select files to upload",
       }));
     if (!picked) return;
-    await api("upload", {
-      id: profile.id,
-      paths: typeof picked === "string" ? [picked] : picked,
+    await uploads.start(
+      profile.id,
+      typeof picked === "string" ? [picked] : picked,
       prefix,
-    });
-    preferences.set({ queueOpen: true });
+    );
   }
   async function download(keys?: string[], directory = local.path) {
     if (!profile) return;
@@ -503,7 +518,7 @@ export default function App() {
       if (!paths.length) return;
       setPrompt({
         title: `Upload ${paths.length} dropped item(s)?`,
-        description: `Destination: ${profile.bucket}/${target.path}. Existing objects will not be overwritten.`,
+        description: `Destination: ${profile.bucket}/${target.path}. You will be asked before replacing existing files.`,
         label: "Upload items",
         execute: () => upload(paths, false, target.path),
       });
@@ -1320,6 +1335,38 @@ export default function App() {
       )}
       {prompt && (
         <ActionPrompt prompt={prompt} onClose={() => setPrompt(undefined)} />
+      )}
+      {uploads.phase === "confirming" && uploads.plan && (
+        <UploadConflictDialog
+          key={uploads.plan.id}
+          plan={uploads.plan}
+          onResolve={uploads.resolve}
+          onCancel={() => void uploads.cancel()}
+        />
+      )}
+      {(uploads.phase === "checking" || uploads.phase === "queueing") && (
+        <Modal
+          title={
+            uploads.phase === "checking"
+              ? "Checking upload destinations…"
+              : "Adding uploads to the queue…"
+          }
+          description={
+            uploads.phase === "checking"
+              ? "Checking every file, including folder contents, for existing destinations."
+              : "Applying your choices. Transfer progress will appear in the queue."
+          }
+          onClose={() => void uploads.cancel()}
+          closeDisabled={uploads.phase === "queueing"}
+        >
+          <div className="form-actions">
+            {uploads.phase === "checking" && (
+              <Button onClick={() => void uploads.cancel()}>
+                Cancel upload
+              </Button>
+            )}
+          </div>
+        </Modal>
       )}
     </div>
   );
