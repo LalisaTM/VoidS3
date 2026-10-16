@@ -128,19 +128,26 @@ describe("workspace actions", () => {
     );
     const local = screen.getByRole("listbox", { name: "Local files" });
     fireEvent.click(within(local).getAllByRole("option")[0]);
-    mockApi.mockResolvedValueOnce({
-      id: "upload-plan",
-      total: 1,
-      conflicts: [
-        {
-          index: 0,
-          path: "C:/test/alpha.txt",
-          key: "alpha.txt",
-          source: { size: 20, modified: null },
-          destination: { size: 40, modified: null },
-          can_replace: true,
-        },
-      ],
+    const fallback = mockApi.getMockImplementation()!;
+    mockApi.mockImplementation(async (action, args) => {
+      if (action === "prepare_upload")
+        return {
+          id: "upload-plan",
+          total: 1,
+          conflicts: [
+            {
+              index: 0,
+              path: "C:/test/alpha.txt",
+              key: "alpha.txt",
+              source: { size: 20, modified: null },
+              destination: { size: 40, modified: null },
+              can_replace: true,
+            },
+          ],
+        };
+      if (action === "commit_upload")
+        return { queued: ["new-upload"], skipped: 0, failed: 0, errors: [] };
+      return fallback(action, args);
     });
     await user.click(
       screen.getByRole("button", { name: /Upload.*Local → S3/ }),
@@ -154,12 +161,6 @@ describe("workspace actions", () => {
       screen.getByRole("dialog", { name: "File already exists" }),
     ).toHaveTextContent("alpha.txt");
     expect(mockApi).not.toHaveBeenCalledWith("upload", expect.anything());
-    mockApi.mockResolvedValueOnce({
-      queued: ["new-upload"],
-      skipped: 0,
-      failed: 0,
-      errors: [],
-    });
     await user.click(screen.getByRole("button", { name: "Replace" }));
     await waitFor(() =>
       expect(mockApi).toHaveBeenCalledWith("commit_upload", {
