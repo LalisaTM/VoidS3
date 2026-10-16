@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use voids3_core::{Credentials, MIB, Profile, Provider, TransferSettings};
 use voids3_s3::S3;
 use voids3_storage::Store;
+use voids3_transfer::upload::{ConflictAction, UploadBatch, UploadChoice};
 use voids3_transfer::{Direction, Engine, Fingerprint, Status, Transfer};
 
 fn client(bucket: String) -> S3 {
@@ -83,6 +84,7 @@ fn job(s3: &S3, path: PathBuf, key: String, size: u64) -> Transfer {
         parts: BTreeMap::new(),
         source: None,
         remote_etag: None,
+        upload_condition: Default::default(),
         priority: 0,
         settings: settings(),
     }
@@ -433,5 +435,200 @@ async fn exercise(s3: &S3, prefix: &str) -> Result<(), Box<dyn std::error::Error
         "Real HTTP transfer, no fabricated data."
     );
     s3.folder(&format!("{prefix}empty/")).await?;
+    exercise_upload_conflicts(s3, &format!("{prefix}conflicts/")).await?;
+    Ok(())
+}
+
+async fn exercise_upload_conflicts(
+    s3: &S3,
+    prefix: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(Store::open(&dir.path().join("queue.db"))?);
+    let engine = Engine::new(store.clone(), settings())?;
+    let folder = dir.path().join("photos");
+    tokio::fs::create_dir(&folder).await?;
+    let small = folder.join("small.txt");
+    let large = folder.join("large.bin");
+    tokio::fs::write(&small, b"new small file").await?;
+    let content = vec![137_u8; (6 * MIB + 31) as usize];
+    tokio::fs::write(&large, &content).await?;
+    tokio::fs::write(folder.join("fresh.txt"), b"fresh").await?;
+    let small_key = format!("{prefix}photos/small.txt");
+    let large_key = format!("{prefix}photos/large.bin");
+    for key in [
+        &small_key,
+        &large_key,
+        &format!("{prefix}photos/small (1).txt"),
+    ] {
+        s3.client
+            .put_object()
+            .bucket(&s3.profile.bucket)
+            .key(key)
+            .body(ByteStream::from_static(b"old destination"))
+            .send()
+            .await?;
+    }
+    let small_original = s3.head(&small_key).await?;
+    let prepare = || UploadBatch::prepare(s3.clone(), vec![folder.clone()], prefix, settings());
+    let batch = prepare().await?;
+    let preview = batch.preview();
+    assert_eq!(preview.total, 3);
+    assert_eq!(preview.conflicts.len(), 2);
+    assert!(
+        preview
+            .conflicts
+            .iter()
+            .all(|item| item.destination.size == 15 && item.can_replace)
+    );
+    drop(batch); // Cancelling confirmation starts no workers and changes no objects.
+    assert!(engine.list()?.is_empty());
+    assert!(prepare().await?.enqueue(&engine, vec![]).await.is_err());
+    assert!(engine.list()?.is_empty());
+    let batch = prepare().await?;
+    let choices = batch
+        .preview()
+        .conflicts
+        .into_iter()
+        .map(|item| UploadChoice {
+            index: item.index,
+            action: if item.key == small_key {
+                ConflictAction::KeepBoth
+            } else {
+                ConflictAction::Replace
+            },
+        })
+        .collect();
+    let outcome = batch.enqueue(&engine, choices).await?;
+    assert_eq!(outcome.queued.len(), 3);
+    assert_eq!(outcome.failed, 0);
+    for id in &outcome.queued {
+        let job = wait(&engine, id).await;
+        assert_eq!(job.status, Status::Completed, "{:?}", job.error);
+    }
+    assert_eq!(s3.head(&small_key).await?.etag, small_original.etag);
+    assert_eq!(
+        s3.preview_text(&format!("{prefix}photos/small (2).txt"))
+            .await?,
+        "new small file"
+    );
+    let bytes = s3
+        .client
+        .get_object()
+        .bucket(&s3.profile.bucket)
+        .key(&large_key)
+        .send()
+        .await?
+        .body
+        .collect()
+        .await?
+        .into_bytes();
+    assert_eq!(bytes.as_ref(), content.as_slice()); // Conditional multipart replacement.
+    let batch = prepare().await?;
+    let choices = batch
+        .preview()
+        .conflicts
+        .into_iter()
+        .map(|item| UploadChoice {
+            index: item.index,
+            action: ConflictAction::Skip,
+        })
+        .collect();
+    let skipped = batch.enqueue(&engine, choices).await?;
+    assert_eq!(skipped.skipped, 3);
+    assert!(skipped.queued.is_empty());
+
+    // Single-request replacement succeeds only for the ETag shown by preflight.
+    let batch = UploadBatch::prepare(
+        s3.clone(),
+        vec![small.clone()],
+        &format!("{prefix}photos/"),
+        settings(),
+    )
+    .await?;
+    let replaced = batch
+        .enqueue(
+            &engine,
+            vec![UploadChoice {
+                index: 0,
+                action: ConflictAction::Replace,
+            }],
+        )
+        .await?;
+    assert_eq!(
+        wait(&engine, &replaced.queued[0]).await.status,
+        Status::Completed
+    );
+    assert_eq!(s3.preview_text(&small_key).await?, "new small file");
+
+    // A later writer wins over an earlier confirmation; resuming retains that
+    // original ETag and cannot grant a broader overwrite permission.
+    let batch = UploadBatch::prepare(
+        s3.clone(),
+        vec![small.clone()],
+        &format!("{prefix}photos/"),
+        settings(),
+    )
+    .await?;
+    s3.client
+        .put_object()
+        .bucket(&s3.profile.bucket)
+        .key(&small_key)
+        .body(ByteStream::from_static(b"another writer"))
+        .send()
+        .await?;
+    let stale = batch
+        .enqueue(
+            &engine,
+            vec![UploadChoice {
+                index: 0,
+                action: ConflictAction::Replace,
+            }],
+        )
+        .await?;
+    assert_eq!(wait(&engine, &stale.queued[0]).await.status, Status::Failed);
+    let restarted = Engine::new(store, settings())?;
+    restarted.resume(s3.clone(), &stale.queued[0])?;
+    assert_eq!(
+        wait(&restarted, &stale.queued[0]).await.status,
+        Status::Failed
+    );
+    assert_eq!(s3.preview_text(&small_key).await?, "another writer");
+
+    // No part of a batch starts when a confirmed local source changes.
+    let batch = prepare().await?;
+    let choices = batch
+        .preview()
+        .conflicts
+        .into_iter()
+        .map(|item| UploadChoice {
+            index: item.index,
+            action: ConflictAction::Replace,
+        })
+        .collect();
+    let count = engine.list()?.len();
+    tokio::fs::write(&small, b"source changed after the question").await?;
+    assert!(batch.enqueue(&engine, choices).await.is_err());
+    assert_eq!(engine.list()?.len(), count);
+
+    // An object created after a no-conflict preflight still cannot be clobbered.
+    let race = dir.path().join("race.txt");
+    tokio::fs::write(&race, b"incoming").await?;
+    let batch = UploadBatch::prepare(s3.clone(), vec![race], prefix, settings()).await?;
+    assert!(batch.preview().conflicts.is_empty());
+    let race_key = format!("{prefix}race.txt");
+    s3.client
+        .put_object()
+        .bucket(&s3.profile.bucket)
+        .key(&race_key)
+        .body(ByteStream::from_static(b"created while confirming"))
+        .send()
+        .await?;
+    let raced = batch.enqueue(&engine, vec![]).await?;
+    assert_eq!(wait(&engine, &raced.queued[0]).await.status, Status::Failed);
+    assert_eq!(
+        s3.preview_text(&race_key).await?,
+        "created while confirming"
+    );
     Ok(())
 }

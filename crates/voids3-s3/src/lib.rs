@@ -21,6 +21,7 @@ pub struct S3 {
 pub struct ObjectInfo {
     pub size: u64,
     pub etag: String,
+    pub modified: Option<i64>,
     pub content_type: Option<String>,
     pub cache_control: Option<String>,
     pub metadata: HashMap<String, String>,
@@ -162,27 +163,39 @@ impl S3 {
         }
     }
     pub async fn head(&self, key: &str) -> Result<ObjectInfo> {
-        let output = self
+        self.head_optional(key)
+            .await?
+            .ok_or_else(|| api_error("Inspect object", Some("NotFound")))
+    }
+    /// Only an explicit missing-object response means absence. Permissions,
+    /// network errors and missing buckets must stop conflict planning.
+    pub async fn head_optional(&self, key: &str) -> Result<Option<ObjectInfo>> {
+        let output = match self
             .client
             .head_object()
             .bucket(&self.profile.bucket)
             .key(key)
             .send()
             .await
-            .map_err(|e| {
-                api_error(
-                    "Inspect object",
-                    e.as_service_error().and_then(|s| s.meta().code()),
-                )
-            })?;
-        Ok(ObjectInfo {
+        {
+            Ok(output) => output,
+            Err(e) => {
+                let code = e.as_service_error().and_then(|s| s.meta().code());
+                if matches!(code, Some("NotFound" | "NoSuchKey" | "404")) {
+                    return Ok(None);
+                }
+                return Err(api_error("Inspect object", code));
+            }
+        };
+        Ok(Some(ObjectInfo {
             size: output.content_length().unwrap_or(0).max(0) as u64,
             etag: output.e_tag().unwrap_or_default().into(),
+            modified: output.last_modified().map(|time| time.secs()),
             content_type: output.content_type().map(str::to_owned),
             cache_control: output.cache_control().map(str::to_owned),
             metadata: output.metadata().cloned().unwrap_or_default(),
             version_id: output.version_id().map(str::to_owned),
-        })
+        }))
     }
     pub async fn folder(&self, key: &str) -> Result<()> {
         self.profile.writable()?;

@@ -67,6 +67,30 @@ export interface DeleteResult {
   failed: number;
   errors: string[];
 }
+export type ConflictAction = "replace" | "skip" | "keep_both";
+export interface UploadChoice {
+  index: number;
+  action: ConflictAction;
+}
+export interface UploadConflict {
+  index: number;
+  path: string;
+  key: string;
+  source: { size: number; modified: number | null };
+  destination: { size: number; modified: number | null };
+  can_replace: boolean;
+}
+export interface PreparedUpload {
+  id: string;
+  total: number;
+  conflicts: UploadConflict[];
+}
+export interface UploadResult {
+  queued: string[];
+  skipped: number;
+  failed: number;
+  errors: string[];
+}
 export interface Change {
   key: string;
   action: "upload" | "download" | "conflict" | "skip";

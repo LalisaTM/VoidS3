@@ -78,6 +78,18 @@ enum Request {
         paths: Vec<PathBuf>,
         prefix: String,
     },
+    PrepareUpload {
+        id: String,
+        paths: Vec<PathBuf>,
+        prefix: String,
+    },
+    CommitUpload {
+        id: String,
+        choices: Vec<voids3_transfer::upload::UploadChoice>,
+    },
+    DiscardUpload {
+        id: String,
+    },
     Download {
         id: String,
         keys: Vec<String>,
@@ -188,6 +200,14 @@ async fn execute(app: Arc<App>, request: Request) -> Result<Value> {
             app.client(&id).await?.presign(&key, false, seconds).await?
         )),
         Request::Upload { id, paths, prefix } => Ok(json!(app.upload(&id, paths, &prefix).await?)),
+        Request::PrepareUpload { id, paths, prefix } => {
+            Ok(json!(app.prepare_upload(&id, paths, &prefix).await?))
+        }
+        Request::CommitUpload { id, choices } => Ok(json!(app.commit_upload(&id, choices).await?)),
+        Request::DiscardUpload { id } => {
+            app.discard_upload(&id)?;
+            Ok(Value::Null)
+        }
         Request::Download {
             id,
             keys,

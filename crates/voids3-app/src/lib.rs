@@ -3,12 +3,21 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use voids3_core::{Error, Result, TransferSettings};
 use voids3_s3::S3;
 use voids3_storage::Store;
+use voids3_transfer::upload::{UploadBatch, UploadChoice, UploadPreview, UploadResult};
 use voids3_transfer::{Direction, Engine, Status};
+
+#[derive(Serialize)]
+pub struct PreparedUpload {
+    pub id: String,
+    #[serde(flatten)]
+    pub preview: UploadPreview,
+}
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +63,7 @@ impl DeleteResult {
 pub struct App {
     pub store: Arc<Store>,
     pub engine: Arc<Engine>,
+    uploads: Mutex<HashMap<String, (Instant, UploadBatch)>>,
     _instance_lock: std::fs::File,
 }
 impl App {
@@ -72,6 +82,7 @@ impl App {
         Ok(Self {
             store,
             engine,
+            uploads: Mutex::new(HashMap::new()),
             _instance_lock: instance_lock,
         })
     }
@@ -182,35 +193,7 @@ impl App {
         let client = self.client(id).await?;
         client.profile.writable()?;
         let settings = self.settings()?;
-        let mut pending = Vec::new();
-        for path in paths {
-            let meta = tokio::fs::symlink_metadata(&path).await?;
-            if meta.file_type().is_symlink() {
-                return Err(Error::Invalid(
-                    "Symbolic link uploads must be selected by their actual path".into(),
-                ));
-            }
-            let filename = path
-                .file_name()
-                .ok_or_else(|| Error::Invalid("Cannot upload a filesystem root".into()))?
-                .to_string_lossy()
-                .to_string();
-            if meta.is_dir() {
-                let root = path.clone();
-                let entries =
-                    tokio::task::spawn_blocking(move || voids3_platform::recursive_files(&root))
-                        .await
-                        .map_err(|e| Error::Storage(e.to_string()))??;
-                for entry in entries {
-                    pending.push((
-                        PathBuf::from(entry.path),
-                        format!("{prefix}{filename}/{}", entry.name),
-                    ));
-                }
-            } else {
-                pending.push((path, format!("{prefix}{filename}")));
-            }
-        }
+        let pending = voids3_transfer::upload::sources(paths, prefix).await?;
         if pending.len() + self.engine.list()?.len() > 100_000 {
             return Err(Error::Invalid("Queue limit is 100,000 files. Clear completed history or choose a smaller selection".into()));
         }
@@ -229,6 +212,70 @@ impl App {
             );
         }
         Ok(ids)
+    }
+    pub async fn prepare_upload(
+        &self,
+        id: &str,
+        paths: Vec<PathBuf>,
+        prefix: &str,
+    ) -> Result<PreparedUpload> {
+        let batch =
+            UploadBatch::prepare(self.client(id).await?, paths, prefix, self.settings()?).await?;
+        let preview = batch.preview();
+        let mut uploads = self
+            .uploads
+            .lock()
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        uploads.retain(|_, (created, _)| created.elapsed() < Duration::from_secs(900));
+        if uploads.len() >= 4 {
+            return Err(Error::Conflict(
+                "Finish or cancel the pending upload confirmations first".into(),
+            ));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        uploads.insert(id.clone(), (Instant::now(), batch));
+        Ok(PreparedUpload { id, preview })
+    }
+    pub fn discard_upload(&self, id: &str) -> Result<()> {
+        self.uploads
+            .lock()
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .remove(id);
+        Ok(())
+    }
+    pub async fn commit_upload(
+        &self,
+        id: &str,
+        choices: Vec<UploadChoice>,
+    ) -> Result<UploadResult> {
+        let (created, batch) = self
+            .uploads
+            .lock()
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .remove(id)
+            .ok_or_else(|| {
+                Error::Invalid(
+                    "Upload confirmation expired or was already used. Upload again.".into(),
+                )
+            })?;
+        if created.elapsed() >= Duration::from_secs(900) {
+            return Err(Error::Conflict(
+                "Upload confirmation expired. Upload again to recheck destinations.".into(),
+            ));
+        }
+        let current = self.store.profile(&batch.profile().id)?;
+        current.writable()?;
+        let target = batch.profile();
+        if current.endpoint != target.endpoint
+            || current.bucket != target.bucket
+            || current.region != target.region
+            || current.path_style != target.path_style
+        {
+            return Err(Error::Conflict(
+                "Connection changed since upload preflight. Upload again.".into(),
+            ));
+        }
+        batch.enqueue(&self.engine, choices).await
     }
     pub async fn delete_entries(
         &self,

@@ -5782,7 +5782,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voids3-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5798,7 +5798,7 @@ dependencies = [
 
 [[package]]
 name = "voids3-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -5813,7 +5813,7 @@ dependencies = [
 
 [[package]]
 name = "voids3-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5824,7 +5824,7 @@ dependencies = [
 
 [[package]]
 name = "voids3-desktop"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5844,7 +5844,7 @@ dependencies = [
 
 [[package]]
 name = "voids3-platform"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dirs 6.0.0",
  "tempfile",
@@ -5855,7 +5855,7 @@ dependencies = [
 
 [[package]]
 name = "voids3-s3"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aws-sdk-s3",
  "percent-encoding",
@@ -5866,7 +5866,7 @@ dependencies = [
 
 [[package]]
 name = "voids3-storage"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "keyring",
  "rusqlite",
@@ -5879,7 +5879,7 @@ dependencies = [
 
 [[package]]
 name = "voids3-sync"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "voids3-core",
@@ -5887,7 +5887,7 @@ dependencies = [
 
 [[package]]
 name = "voids3-transfer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aws-sdk-s3",
  "futures",
