@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod shutdown;
+#[cfg(target_os = "windows")]
+mod updater;
+#[cfg(not(target_os = "windows"))]
+#[path = "updater_unavailable.rs"]
 mod updater;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -311,12 +315,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with_target(false)
         .init();
     let app = Arc::new(App::open()?);
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(app)
         .manage(updater::Updates::default())
         .manage(shutdown::Shutdown::default())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init());
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    builder
         .invoke_handler(tauri::generate_handler![
             dispatch,
             updater::check_for_updates,

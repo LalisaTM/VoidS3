@@ -7,6 +7,7 @@
 - Attempt multipart aborts and owned partial-download removal while preserving completed files. Show cleanup failures or a 30-second timeout and offer Keep open or an explicit Close anyway; retain unfinished records for retry.
 - Keep close callbacks limited to event suppression and task scheduling. Move bulk queue operations, settings, download-path validation, automatic conflict decisions and sync comparison onto background workers. Add a blocked-storage executor responsiveness regression test and real HTTP shutdown cleanup coverage.
 - Sort/filter directory listings over 500 entries in a Web Worker, reuse its dataset across filter changes and reject stale results. Cache listing totals and use a selected-path set during rendering.
+- Remove the updater's unused archive extraction and its vulnerable ZIP dependency; retain the signed raw NSIS update path on Windows and explicit unsupported results on other platforms.
 
 ## 0.3.0 — 2026-10-16
 
