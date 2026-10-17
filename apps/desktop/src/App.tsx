@@ -459,10 +459,13 @@ export default function App() {
   const readonly = !!profile?.read_only;
   const focusedRemote = focusedSide === "remote";
   const focusedSelection = focusedRemote ? remoteSelection : localSelection;
-  const focusedPaths = new Set(focusedSelection);
-  const focusedEntries = (
-    focusedRemote ? entries : (localFiles.data ?? [])
-  ).filter((entry) => focusedPaths.has(entry.path));
+  const focusedEntries = useMemo(() => {
+    if (!focusedSelection.length) return [];
+    const paths = new Set(focusedSelection);
+    return (focusedRemote ? entries : (localFiles.data ?? [])).filter((entry) =>
+      paths.has(entry.path),
+    );
+  }, [focusedSelection, focusedRemote, entries, localFiles.data]);
   const canDelete =
     desktop &&
     focusedEntries.length > 0 &&
@@ -471,12 +474,15 @@ export default function App() {
       (!!profile &&
         !readonly &&
         focusedEntries.every((entry) => !entry.is_dir)));
-  const signedEntry =
-    remoteSelection.length === 1
-      ? entries.find(
-          (entry) => entry.path === remoteSelection[0] && !entry.is_dir,
-        )
-      : undefined;
+  const signedEntry = useMemo(
+    () =>
+      remoteSelection.length === 1
+        ? entries.find(
+            (entry) => entry.path === remoteSelection[0] && !entry.is_dir,
+          )
+        : undefined,
+    [remoteSelection, entries],
+  );
   const connected = !!profile && remoteFiles.isSuccess;
   const currentError =
     error ||

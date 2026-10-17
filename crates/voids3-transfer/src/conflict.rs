@@ -101,6 +101,11 @@ impl Engine {
         all: bool,
         epoch: u64,
     ) -> Result<()> {
+        let controls = self.controls.lock().map_err(lock)?;
+        self.ensure_open()?;
+        if self.stop_epoch.load(std::sync::atomic::Ordering::Acquire) != epoch {
+            return Err(Error::Cancelled);
+        }
         let selected = self.get(id)?;
         if selected.status != Status::Conflict {
             return Err(Error::Invalid(
@@ -138,13 +143,16 @@ impl Engine {
             .map(|job| job.id.clone())
             .collect();
         let engine = self.clone();
+        let background = self.background_work();
+        let stop = self.preparation.lock().map_err(lock)?.clone();
+        drop(controls);
         tokio::spawn(async move {
+            let _background = background;
             for id in ids {
-                while engine
-                    .controls
-                    .lock()
-                    .is_ok_and(|controls| controls.len() >= batch::BACKLOG)
-                {
+                while engine.controls.lock().is_ok_and(|controls| {
+                    controls.len() >= batch::BACKLOG
+                        || engine.closing.load(std::sync::atomic::Ordering::Acquire)
+                }) {
                     if engine.stop_epoch.load(std::sync::atomic::Ordering::Acquire) != epoch {
                         return;
                     }
@@ -159,7 +167,11 @@ impl Engine {
                 if job.status != Status::Conflict {
                     continue;
                 }
-                if let Err(error) = engine.apply_conflict(&s3, &mut job, action).await {
+                let result = tokio::select! { biased;
+                    _ = stop.cancelled() => return,
+                    result = engine.apply_conflict(&s3, &mut job, action) => result,
+                };
+                if let Err(error) = result {
                     job.error = Some(error.to_string());
                     // Leave a resolvable conflict visible, including cleanup failures.
                 } else if job.status != Status::Skipped {

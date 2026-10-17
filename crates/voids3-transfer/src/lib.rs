@@ -1,6 +1,7 @@
 //! Persistent transfer engine shared by desktop and CLI. Files never cross IPC.
 pub mod batch;
 mod conflict;
+pub mod shutdown;
 pub mod upload;
 pub mod view;
 use aws_sdk_s3::{
@@ -145,6 +146,10 @@ pub struct Engine {
     maintenance: std::sync::atomic::AtomicBool,
     feeds: Mutex<HashMap<String, batch::Feed>>,
     stop_epoch: std::sync::atomic::AtomicU64,
+    closing: std::sync::atomic::AtomicBool,
+    background: std::sync::atomic::AtomicUsize,
+    preparation: Mutex<CancellationToken>,
+    preparing: std::sync::atomic::AtomicUsize,
 }
 /// Holds the queue idle while a desktop update is downloaded and installed.
 /// Dropping the guard after a failed update allows transfers again.
@@ -178,6 +183,10 @@ impl Engine {
             maintenance: std::sync::atomic::AtomicBool::new(false),
             feeds: Mutex::new(feeds),
             stop_epoch: std::sync::atomic::AtomicU64::new(0),
+            closing: std::sync::atomic::AtomicBool::new(false),
+            background: std::sync::atomic::AtomicUsize::new(0),
+            preparation: Mutex::new(CancellationToken::new()),
+            preparing: std::sync::atomic::AtomicUsize::new(0),
         }))
     }
     pub fn list(&self) -> Result<Vec<Transfer>> {
@@ -189,6 +198,12 @@ impl Engine {
                 .then(a.id.cmp(&b.id))
         });
         Ok(jobs)
+    }
+    pub fn len(&self) -> Result<usize> {
+        Ok(self.jobs.lock().map_err(lock)?.len())
+    }
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.len()? == 0)
     }
     fn save(&self, job: &Transfer) -> Result<()> {
         self.store.put("transfers", &job.id, job)?;
@@ -351,8 +366,13 @@ impl Engine {
             return Err(Error::Conflict("Connection target changed since this transfer was queued. Restore its original endpoint, bucket, region, and addressing mode before resuming or cancelling.".into()));
         }
         let worker_epoch;
+        let background;
         {
             let mut controls = self.controls.lock().map_err(lock)?;
+            // Cancellation-only workers may still start to abort an idle MPU.
+            if !control.cancel.load(std::sync::atomic::Ordering::Acquire) {
+                self.ensure_open()?;
+            }
             if control.epoch.is_some_and(|epoch| {
                 epoch != self.stop_epoch.load(std::sync::atomic::Ordering::Acquire)
             }) {
@@ -392,9 +412,11 @@ impl Engine {
             self.save(&job)?;
             worker_epoch = self.stop_epoch.load(std::sync::atomic::Ordering::Acquire);
             controls.insert(job.id.clone(), control.clone());
+            background = self.background_work();
         }
         let engine = Arc::clone(self);
         tokio::spawn(async move {
+            let _background = background;
             let mut job = job;
             let result = engine.run(&s3, &mut job, &control).await;
             if let Err(error) = result {
@@ -422,7 +444,7 @@ impl Engine {
                 } else {
                     Status::Failed
                 };
-                job.error = if matches!(error, Error::Paused) {
+                job.error = if cancelled || matches!(error, Error::Paused) {
                     None
                 } else {
                     Some(error.to_string())
@@ -485,13 +507,33 @@ impl Engine {
             if let Some(batch) = policy_batch
                 && let Ok(Some(action)) = engine.batch_policy(Some(&batch))
             {
-                let _ = engine.resolve_conflicts_at_epoch(
-                    s3,
-                    &transfer_id,
-                    action,
-                    false,
-                    worker_epoch,
-                );
+                // A close prompt freezes admission, but Keep open must not lose
+                // a batch policy decision that arrived while the prompt was up.
+                while worker_epoch == engine.stop_epoch.load(std::sync::atomic::Ordering::Acquire) {
+                    if engine.closing.load(std::sync::atomic::Ordering::Acquire) {
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                        continue;
+                    }
+                    let resolver = engine.clone();
+                    let target = s3.clone();
+                    let id = transfer_id.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        resolver.resolve_conflicts_at_epoch(
+                            target,
+                            &id,
+                            action,
+                            false,
+                            worker_epoch,
+                        )
+                    })
+                    .await;
+                    if matches!(result, Ok(Err(_)))
+                        && engine.closing.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        continue;
+                    }
+                    break;
+                }
             }
         });
         Ok(())
@@ -506,7 +548,9 @@ impl Engine {
     }
     pub fn begin_maintenance(self: &Arc<Self>) -> Result<MaintenanceGuard> {
         let controls = self.controls.lock().map_err(lock)?;
+        self.ensure_open()?;
         if !controls.is_empty()
+            || self.preparing.load(std::sync::atomic::Ordering::Acquire) != 0
             || self
                 .feeds
                 .lock()
@@ -536,6 +580,10 @@ impl Engine {
     /// before any network or credential work can delay a global stop.
     pub fn interrupt_all(&self, cancel: bool) -> Result<Vec<String>> {
         let controls = self.controls.lock().map_err(lock)?;
+        let mut preparation = self.preparation.lock().map_err(lock)?;
+        preparation.cancel();
+        *preparation = CancellationToken::new();
+        drop(preparation);
         self.stop_epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         for feed in self.feeds.lock().map_err(lock)?.values() {
@@ -573,7 +621,7 @@ impl Engine {
             return Ok(true);
         }
         let mut job = self.get(id)?;
-        if job.status == Status::Completed {
+        if matches!(job.status, Status::Completed | Status::Skipped) {
             return Ok(true);
         }
         if job.upload_id.is_some() {
@@ -599,14 +647,15 @@ impl Engine {
                 continue;
             }
             let mut job = job.clone();
+            job.error = None;
             if job.direction == Direction::Download
                 && let Err(error) = std::fs::remove_file(partial_path(&job))
                 && error.kind() != std::io::ErrorKind::NotFound
             {
-                return Err(error.into());
+                // A failed cleanup must not stop cancellation of other jobs.
+                job.error = Some(format!("Partial file cleanup failed: {error}"));
             }
             job.status = Status::Cancelled;
-            job.error = None;
             job.conflict = None;
             updates.push((job.id.clone(), job));
         }
@@ -1284,6 +1333,59 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+    #[test]
+    fn close_summary_includes_paused_conflicts_and_retained_cleanup_failures() {
+        let (_dir, engine, mut job) = fixture();
+        let (guard, summary) = engine.begin_close().unwrap();
+        assert_eq!(summary.transfers, 1);
+        assert!(summary.needs_confirmation());
+        assert!(engine.resume_batches().is_err());
+        drop(guard);
+        job.status = Status::Conflict;
+        engine.save(&job).unwrap();
+        let (guard, summary) = engine.begin_close().unwrap();
+        assert_eq!(summary.transfers, 1);
+        assert!(engine.check_closed().is_err());
+        drop(guard);
+        job.status = Status::Cancelled;
+        job.error = Some("Partial file cleanup failed".into());
+        engine.save(&job).unwrap();
+        let (_guard, summary) = engine.begin_close().unwrap();
+        assert!(summary.needs_confirmation());
+        assert!(engine.check_closed().is_err());
+        engine.request_cancel(&job.id).unwrap();
+        engine.check_closed().unwrap();
+        assert_eq!(
+            engine.store.list::<Transfer>("transfers").unwrap()[0].status,
+            Status::Cancelled
+        );
+    }
+    #[test]
+    fn one_partial_cleanup_failure_does_not_prevent_other_idle_cancellations() {
+        let (_dir, engine, job) = fixture();
+        let partial = partial_path(&job);
+        std::fs::create_dir(&partial).unwrap(); // remove_file must fail on this fixture.
+        let mut other = job.clone();
+        other.id = "another-pending-transfer".into();
+        other.direction = Direction::Upload;
+        engine.save(&other).unwrap();
+        assert_eq!(engine.cancel_idle().unwrap().len(), 2);
+        let failed = engine.get(&job.id).unwrap();
+        assert_eq!(failed.status, Status::Cancelled);
+        assert!(
+            failed
+                .error
+                .unwrap()
+                .contains("Partial file cleanup failed")
+        );
+        assert_eq!(engine.get(&other.id).unwrap().status, Status::Cancelled);
+        assert!(engine.check_closed().is_err());
+        engine.clear_finished().unwrap();
+        assert!(engine.get(&job.id).is_ok());
+        std::fs::remove_dir(partial).unwrap();
+        engine.request_cancel(&job.id).unwrap();
+        engine.check_closed().unwrap();
     }
     #[tokio::test]
     async fn fingerprint_detects_changed_source() {

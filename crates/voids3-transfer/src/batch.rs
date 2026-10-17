@@ -167,6 +167,7 @@ impl Engine {
         settings.validate()?;
         let scanner = Scanner::new(paths, prefix)?;
         let controls = self.controls.lock().map_err(lock)?;
+        self.ensure_open()?;
         if self.maintenance.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Error::Conflict(
                 "An application update is in progress".into(),
@@ -195,11 +196,13 @@ impl Engine {
         self.store.put("upload_batches", &id, &progress)?;
         let (state, receiver) = watch::channel(FeedState::Running);
         feeds.insert(id.clone(), Feed { progress, state });
+        let background = self.background_work();
         drop(feeds);
         drop(controls);
         let engine = self.clone();
         let batch_id = id.clone();
         tokio::spawn(async move {
+            let _background = background;
             let result = engine
                 .feed_batch(&s3, &batch_id, scanner, settings, receiver)
                 .await;
@@ -250,6 +253,9 @@ impl Engine {
                     {
                         Ok(_) => break,
                         Err(Error::Paused) => continue,
+                        Err(_) if self.closing.load(std::sync::atomic::Ordering::Acquire) => {
+                            continue;
+                        }
                         Err(error) => return Err(error),
                     }
                 }
@@ -265,7 +271,8 @@ impl Engine {
             match *state.borrow_and_update() {
                 FeedState::Cancelled => return Err(Error::Cancelled),
                 FeedState::Failed => return Err(Error::Provider("Discovery stopped after a connection or permission failure. Fix the connection, then start the remaining files again.".into())),
-                FeedState::Running if self.controls.lock().map_err(lock)?.len() < BACKLOG => {
+                FeedState::Running if !self.closing.load(std::sync::atomic::Ordering::Acquire)
+                    && self.controls.lock().map_err(lock)?.len() < BACKLOG => {
                     return Ok(());
                 }
                 _ => {}
@@ -306,6 +313,7 @@ impl Engine {
     }
     pub fn resume_batches(&self) -> Result<()> {
         let _controls = self.controls.lock().map_err(lock)?;
+        self.ensure_open()?;
         if self.maintenance.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Error::Conflict(
                 "An application update is in progress".into(),

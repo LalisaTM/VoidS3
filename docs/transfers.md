@@ -30,7 +30,15 @@ Dragging between panes uses pointer events so Windows native Explorer drops can 
 
 Crash windows remain: the provider can accept a final upload before local completion state is committed. A subsequent retry can report a conflict or `NoSuchUpload`; verify the remote object, then cancel the stale queue entry. Automatic resolution of ambiguous completion, checksum verification, automatic retry of an interrupted download body, parallel ranged downloads, and bandwidth shaping remain unfinished. An OS file lock prevents concurrent instances from operating the shared queue; distributed scheduling is not supported.
 
-## Integration tests
+## Closing the desktop app
+
+The titlebar close button, Alt+F4 and application exit requests use a native close check. If transfers, preparation, discovery or cleanup remain, VoidS3 reports the pending counts and asks whether to cancel and close. Keep open is the default; Escape or dismissing the dialog leaves work running. New admissions wait or fail while the close check is open so a new batch cannot slip past an empty-queue check.
+
+Confirming cancels preparation, discovery, deferred conflict decisions and every pending transfer across connections, including paused and conflicting records. Cancellation-only workers may still start to abort idle multipart uploads. The app waits for workers, discovery and conflict tasks to settle and persist their outcomes. It removes only its own partial downloads and attempts to abort unfinished multipart sessions; completed files are preserved. The native window title reports cancellation/cleanup. No storage, traversal, transfer or cleanup work runs in the native close callback.
+
+If cleanup fails or takes over 30 seconds, the app stays open for a second decision: Keep open to inspect/retry, or Close anyway. The latter can leave remote multipart sessions or local partial files; saved records remain recoverable. A forced process kill, crash or OS termination cannot provide this orderly shutdown guarantee. An update installation reserves the queue separately: ordinary closing is blocked during update download/install, and the verified installer restart retains paused work as before.
+
+## Integration test setup
 
 Run an isolated Moto S3 endpoint on loopback:
 

@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, type MouseEvent } from "react";
+import { useFileOrder } from "../lib/useFileOrder";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import {
@@ -57,22 +58,13 @@ export function Files({
   const [menu, setMenu] = useState<string | null>(null);
   const anchor = useRef(0);
   const container = useRef<HTMLDivElement>(null);
-  const filtered = useMemo(
-    () =>
-      entries
-        .filter((e) =>
-          e.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
-        )
-        .sort((a, b) => {
-          if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-          const cmp =
-            sort === "name"
-              ? a.name.localeCompare(b.name)
-              : (a[sort] ?? 0) - (b[sort] ?? 0);
-          return descending ? -cmp : cmp;
-        }),
-    [entries, search, sort, descending],
-  );
+  const {
+    filtered,
+    totalBytes,
+    ordering,
+    error: orderError,
+  } = useFileOrder(entries, { search, sort, descending });
+  const selectedPaths = useMemo(() => new Set(selected), [selected]);
   const virtual = useVirtualizer({
     count: filtered.length,
     getScrollElement: () => container.current,
@@ -92,7 +84,7 @@ export function Files({
       );
     else if (event.ctrlKey || event.metaKey) {
       onSelect(
-        selected.includes(entry.path)
+        selectedPaths.has(entry.path)
           ? selected.filter((p) => p !== entry.path)
           : [...selected, entry.path],
       );
@@ -205,17 +197,21 @@ export function Files({
           }
         }}
       >
-        {error ? (
+        {error || orderError ? (
           <div className="empty-state">
             <div className="error-box" role="alert">
-              {error}
+              {error || orderError}
             </div>
-            <Button onClick={onRetry}>Try again</Button>
+            <Button
+              onClick={orderError ? () => window.location.reload() : onRetry}
+            >
+              {orderError ? "Reload view" : "Try again"}
+            </Button>
           </div>
-        ) : loading ? (
+        ) : loading || ordering ? (
           <div className="empty-state">
             <span className="loading-dot" />
-            Reading directory…
+            {ordering ? "Sorting directory…" : "Reading directory…"}
           </div>
         ) : !filtered.length ? (
           <div className="empty-state">
@@ -260,13 +256,13 @@ export function Files({
                 <div
                   key={entry.path}
                   role="option"
-                  aria-selected={selected.includes(entry.path)}
+                  aria-selected={selectedPaths.has(entry.path)}
                   data-entry-path={entry.path}
                   data-entry-folder={entry.is_dir ? entry.path : undefined}
                   data-drop-hover={
                     (entry.is_dir && entry.path === dropPath) || undefined
                   }
-                  className={`file-row ${selected.includes(entry.path) ? "selected" : ""}`}
+                  className={`file-row ${selectedPaths.has(entry.path) ? "selected" : ""}`}
                   style={{
                     position: "absolute",
                     top: 0,
@@ -282,7 +278,7 @@ export function Files({
                   onDoubleClick={() => onOpen(entry)}
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    if (!selected.includes(entry.path)) onSelect([entry.path]);
+                    if (!selectedPaths.has(entry.path)) onSelect([entry.path]);
                     setMenu(entry.path);
                   }}
                   draggable={false}
@@ -401,7 +397,7 @@ export function Files({
                             disabled={!writable}
                             onSelect={() =>
                               onAction(
-                                selected.includes(entry.path) &&
+                                selectedPaths.has(entry.path) &&
                                   selected.length > 1
                                   ? "delete-selected"
                                   : "delete",
@@ -409,7 +405,7 @@ export function Files({
                               )
                             }
                           >
-                            {selected.includes(entry.path) &&
+                            {selectedPaths.has(entry.path) &&
                             selected.length > 1
                               ? "Delete selected items…"
                               : remote
@@ -432,9 +428,7 @@ export function Files({
             ? `${selected.length} selected`
             : `${filtered.length} items`}
         </span>
-        <span>
-          {bytes(filtered.reduce((sum, e) => sum + (e.is_dir ? 0 : e.size), 0))}
-        </span>
+        <span>{bytes(totalBytes)}</span>
       </div>
     </div>
   );

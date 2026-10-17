@@ -1,5 +1,14 @@
 # Validation evidence
 
+Close/cancellation update validated locally on Windows x64, 2026-10-17:
+
+- Unit tests cover duplicate close requests, default Keep open/Escape/dismissal, pending paused/conflicting/cleanup records, admission reopening without cancellation, confirmed preparation cancellation, background-task draining and mutual exclusion with the updater.
+- A regression test holds the real SQLite writer mutex while shutdown persists cancellation. A timer on the same single-thread Tokio executor still runs, demonstrating that blocked storage does not occupy that executor. This is not an installed-app frame-rate measurement.
+- Forty-three frontend tests cover the existing controls plus 10,000-entry directory ordering, worker dataset reuse, stale-response rejection, worker disposal and visible worker errors. Listings over 500 entries use a Web Worker; small listings stay bounded and synchronous. Totals and selected-path membership are cached for rendering.
+- A collaborative-browser check executes the real Vite-served Web Worker on 10,000 synthetic files. It returns the correctly sorted 10,000 indices and byte total while a main-thread timer keeps ticking. This verifies the worker handoff in a browser, not native desktop throughput or a frame-rate target.
+- The real HTTP Moto suite covers close-time admission blocking, discovery cancellation, an idle multipart abort, partial-download removal, completed/source-file preservation, durable cancelled records and restart recovery.
+- Native dialog interaction and installed-app frame-rate profiling remain unverified. Existing 10,000-job queue bounds remain covered. Live-provider cleanup and performance must not be inferred from emulator results.
+
 Large-batch update validated locally on Windows x64, 2026-10-16:
 
 - Thirty-nine frontend tests cover background upload registration, per-file conflict decisions, future batch policies, presets/custom edits, a 10,000-item summary with only 100 rendered rows, pagination/filter requests and no collapsed-page fetching.

@@ -207,9 +207,10 @@ pub async fn install_update(
         .filter(|update| update.version == version)
         .ok_or("Check for this update again before installing")?
         .clone();
-    let maintenance = app
-        .engine
-        .begin_maintenance()
+    let engine = app.engine.clone();
+    let maintenance = tokio::task::spawn_blocking(move || engine.begin_maintenance())
+        .await
+        .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
     let mut downloaded = 0_u64;
     let mut last_event = Instant::now();

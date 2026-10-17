@@ -1,4 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod shutdown;
+#[cfg(target_os = "windows")]
+mod updater;
+#[cfg(not(target_os = "windows"))]
+#[path = "updater_unavailable.rs"]
 mod updater;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -210,7 +215,7 @@ async fn execute(app: Arc<App>, request: Request) -> Result<Value> {
             keys,
             directory,
         } => Ok(json!(app.download(&id, keys, directory).await?)),
-        Request::Transfers => Ok(json!(app.engine.list()?)),
+        Request::Transfers => Ok(json!(blocking(move || app.engine.list()).await?)),
         Request::StartUpload { id, paths, prefix } => {
             Ok(json!(app.start_upload(&id, paths, prefix).await?))
         }
@@ -227,11 +232,18 @@ async fn execute(app: Arc<App>, request: Request) -> Result<Value> {
             blocking(move || app.engine.page(&filter, offset, limit)).await?
         )),
         Request::TransferControl { id, operation } => {
-            if matches!(operation, Control::Cancel) && app.engine.request_cancel(&id)? {
-                return Ok(Value::Null);
+            if matches!(operation, Control::Cancel) {
+                let engine = app.engine.clone();
+                let transfer_id = id.clone();
+                if blocking(move || engine.request_cancel(&transfer_id)).await? {
+                    return Ok(Value::Null);
+                }
             }
             match operation {
-                Control::Pause => app.engine.pause(&id)?,
+                Control::Pause => {
+                    let engine = app.engine.clone();
+                    blocking(move || engine.pause(&id)).await?;
+                }
                 Control::Resume | Control::Cancel => {
                     let job = app.engine.transfer(&id)?;
                     let client = app.client(&job.profile_id).await?;
@@ -251,10 +263,10 @@ async fn execute(app: Arc<App>, request: Request) -> Result<Value> {
             blocking(move || app.engine.clear_finished()).await?;
             Ok(Value::Null)
         }
-        Request::Settings => Ok(json!(app.settings()?)),
+        Request::Settings => Ok(json!(blocking(move || app.settings()).await?)),
         Request::TransferPresets => Ok(json!(voids3_core::transfer_presets())),
         Request::SaveSettings { settings } => {
-            app.save_settings(settings)?;
+            blocking(move || app.save_settings(settings)).await?;
             Ok(Value::Null)
         }
         Request::SyncPreview {
@@ -276,9 +288,25 @@ async fn dispatch(
     state: tauri::State<'_, Arc<App>>,
     request: Request,
 ) -> std::result::Result<Value, String> {
-    execute(state.inner().clone(), request)
-        .await
-        .map_err(|e| e.to_string())
+    let app = state.inner().clone();
+    let outcome = async {
+        if matches!(
+            &request,
+            Request::Upload { .. }
+                | Request::Download { .. }
+                | Request::StartUpload { .. }
+                | Request::ResolveUpload { .. }
+                | Request::SyncApply { .. }
+        ) {
+            let engine = app.engine.clone();
+            let preparation = blocking(move || engine.begin_preparation()).await?;
+            preparation.run(execute(app, request)).await
+        } else {
+            execute(app, request).await
+        }
+    }
+    .await;
+    outcome.map_err(|e| e.to_string())
 }
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Never enable SDK request tracing: signed headers can contain sensitive data.
@@ -287,16 +315,20 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with_target(false)
         .init();
     let app = Arc::new(App::open()?);
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(app)
         .manage(updater::Updates::default())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(shutdown::Shutdown::default())
+        .plugin(tauri_plugin_dialog::init());
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    builder
         .invoke_handler(tauri::generate_handler![
             dispatch,
             updater::check_for_updates,
             updater::install_update
         ])
-        .run(tauri::generate_context!())?;
+        .build(tauri::generate_context!())?
+        .run(shutdown::on_event);
     Ok(())
 }
