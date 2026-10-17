@@ -106,11 +106,16 @@ impl App {
         self.store.put("settings", "transfers", &settings)
     }
     pub async fn control_all(&self, operation: BatchControl) -> Result<BatchControlResult> {
-        let mut interrupted: HashSet<_> = match operation {
-            BatchControl::Pause => self.engine.interrupt_all(false)?,
-            BatchControl::Cancel => self.engine.interrupt_all(true)?,
-            BatchControl::Resume => Vec::new(),
-        }
+        let engine = self.engine.clone();
+        let mut interrupted: HashSet<_> = background(move || match operation {
+            BatchControl::Pause => engine.interrupt_all(false),
+            BatchControl::Cancel => engine.interrupt_all(true),
+            BatchControl::Resume => {
+                engine.resume_batches()?;
+                Ok(Vec::new())
+            }
+        })
+        .await?
         .into_iter()
         .collect();
         if matches!(operation, BatchControl::Cancel) {
@@ -121,9 +126,6 @@ impl App {
                     .map_err(|e| Error::Storage(e.to_string()))??,
             );
         }
-        if matches!(operation, BatchControl::Resume) {
-            self.engine.resume_batches()?;
-        }
         let mut result = BatchControlResult {
             requested: interrupted.len(),
             ..Default::default()
@@ -132,15 +134,14 @@ impl App {
             return Ok(result);
         }
         let mut clients: HashMap<String, std::result::Result<S3, String>> = HashMap::new();
-        for job in self.engine.list()? {
+        let engine = self.engine.clone();
+        let jobs = background(move || engine.list()).await?;
+        for job in jobs {
             if interrupted.contains(&job.id)
                 || match operation {
                     BatchControl::Resume => job.status != Status::Paused,
                     BatchControl::Cancel => {
-                        job.status == Status::Completed
-                            || (job.status == Status::Cancelled
-                                && job.upload_id.is_none()
-                                && job.error.is_none())
+                        job.status.terminal() && job.upload_id.is_none() && job.error.is_none()
                     }
                     BatchControl::Pause => true,
                 }
@@ -148,10 +149,12 @@ impl App {
                 continue;
             }
             let outcome = async {
-                if matches!(operation, BatchControl::Cancel)
-                    && self.engine.request_cancel(&job.id)?
-                {
-                    return Ok(());
+                if matches!(operation, BatchControl::Cancel) {
+                    let engine = self.engine.clone();
+                    let id = job.id.clone();
+                    if background(move || engine.request_cancel(&id)).await? {
+                        return Ok(());
+                    }
                 }
                 if !clients.contains_key(&job.profile_id) {
                     clients.insert(
@@ -167,7 +170,11 @@ impl App {
                     .clone()
                     .map_err(Error::Provider)?;
                 match operation {
-                    BatchControl::Cancel => self.engine.cancel(client, &job.id),
+                    BatchControl::Cancel => {
+                        let engine = self.engine.clone();
+                        let id = job.id.clone();
+                        background(move || engine.cancel(client, &id)).await
+                    }
                     BatchControl::Resume => {
                         let engine = self.engine.clone();
                         let id = job.id.clone();
@@ -191,6 +198,30 @@ impl App {
         }
         Ok(result)
     }
+    /// The caller holds CloseGuard until exit or an explicit decision to stay.
+    pub async fn cancel_and_drain(&self) -> Result<()> {
+        let cancelled = self.control_all(BatchControl::Cancel).await?;
+        loop {
+            let engine = self.engine.clone();
+            if background(move || engine.is_drained()).await? {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        if cancelled.failed != 0 {
+            return Err(Error::Conflict(format!(
+                "Could not cancel {} transfer(s): {}",
+                cancelled.failed,
+                cancelled.errors.join("; ")
+            )));
+        }
+        let engine = self.engine.clone();
+        background(move || engine.check_closed()).await
+    }
+    async fn load_settings(&self) -> Result<TransferSettings> {
+        let store = self.store.clone();
+        background(move || Ok(store.get("settings", "transfers")?.unwrap_or_default())).await
+    }
     pub async fn client(&self, id: &str) -> Result<S3> {
         let store = self.store.clone();
         let id = id.to_owned();
@@ -210,9 +241,9 @@ impl App {
     pub async fn upload(&self, id: &str, paths: Vec<PathBuf>, prefix: &str) -> Result<Vec<String>> {
         let client = self.client(id).await?;
         client.profile.writable()?;
-        let settings = self.settings()?;
+        let settings = self.load_settings().await?;
         let pending = voids3_transfer::upload::sources(paths, prefix).await?;
-        if pending.len() + self.engine.list()?.len() > 100_000 {
+        if pending.len() + self.engine.len()? > 100_000 {
             return Err(Error::Invalid("Queue limit is 100,000 files. Clear completed history or choose a smaller selection".into()));
         }
         let mut ids = Vec::new();
@@ -238,7 +269,7 @@ impl App {
         prefix: String,
     ) -> Result<String> {
         let client = self.client(id).await?;
-        let settings = self.settings()?;
+        let settings = self.load_settings().await?;
         let engine = self.engine.clone();
         tokio::task::spawn_blocking(move || engine.start_batch(client, paths, prefix, settings))
             .await
@@ -310,7 +341,7 @@ impl App {
         directory: PathBuf,
     ) -> Result<Vec<String>> {
         let client = self.client(id).await?;
-        let settings = self.settings()?;
+        let settings = self.load_settings().await?;
         let mut pending = Vec::new();
         let mut directories = Vec::new();
         for key in keys {
@@ -319,43 +350,57 @@ impl App {
                     .trim_end_matches('/')
                     .rsplit('/')
                     .next()
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+                    .to_owned();
                 if folder.is_empty() {
                     return Err(Error::Invalid("Choose a named remote folder".into()));
                 }
-                directories.push(voids3_platform::download_target(&directory, folder)?);
-                for entry in client.scan(&key).await? {
-                    if entry.path.ends_with('/') {
-                        continue;
+                let entries = client.scan(&key).await?;
+                let root = directory.clone();
+                let (folder, files) = background(move || {
+                    let folder = voids3_platform::download_target(&root, &folder)?;
+                    let mut files = Vec::new();
+                    for entry in entries
+                        .into_iter()
+                        .filter(|entry| !entry.path.ends_with('/'))
+                    {
+                        let path = folder_download_target(&root, &key, &entry.path)?;
+                        files.push((entry.path, path));
                     }
-                    let path = folder_download_target(&directory, &key, &entry.path)?;
-                    pending.push((entry.path, path));
-                    if pending.len() > 100_000 {
-                        return Err(Error::Invalid(
-                            "A download selection is limited to 100,000 files".into(),
-                        ));
-                    }
-                }
+                    Ok((folder, files))
+                })
+                .await?;
+                directories.push(folder);
+                pending.extend(files);
             } else {
-                let name = key.rsplit('/').next().unwrap_or_default();
-                pending.push((
-                    key.clone(),
-                    voids3_platform::download_target(&directory, name)?,
+                let root = directory.clone();
+                let name = key.rsplit('/').next().unwrap_or_default().to_owned();
+                let path =
+                    background(move || voids3_platform::download_target(&root, &name)).await?;
+                pending.push((key, path));
+            }
+            if pending.len() > 100_000 {
+                return Err(Error::Invalid(
+                    "A download selection is limited to 100,000 files".into(),
                 ));
             }
         }
-        if pending.len() + self.engine.list()?.len() > 100_000 {
+        if pending.len() + self.engine.len()? > 100_000 {
             return Err(Error::Invalid("Queue limit is 100,000 files".into()));
         }
-        let mut targets = HashSet::new();
-        for (_, path) in &pending {
-            if !targets.insert(path.clone()) {
-                return Err(Error::Conflict(
-                    "Selected objects map to the same local filename; download them separately"
-                        .into(),
-                ));
+        let pending = background(move || {
+            let mut targets = HashSet::new();
+            for (_, path) in &pending {
+                if !targets.insert(path.clone()) {
+                    return Err(Error::Conflict(
+                        "Selected objects map to the same local filename; download them separately"
+                            .into(),
+                    ));
+                }
             }
-        }
+            Ok(pending)
+        })
+        .await?;
         for path in directories {
             tokio::fs::create_dir_all(path).await?;
         }
@@ -391,7 +436,7 @@ impl App {
         let local = tokio::task::spawn_blocking(move || voids3_platform::recursive_files(&local));
         let remote = client.scan(prefix).await?;
         let local = local.await.map_err(|e| Error::Storage(e.to_string()))??;
-        voids3_sync::preview(&local, &remote, mode)
+        background(move || voids3_sync::preview(&local, &remote, mode)).await
     }
     pub async fn sync_additions(
         &self,
@@ -403,7 +448,7 @@ impl App {
         // Always re-scan at apply time. Engine uses conditional remote writes and no-clobber local writes.
         let changes = self.sync_preview(id, local.clone(), prefix, mode).await?;
         let client = self.client(id).await?;
-        let settings = self.settings()?;
+        let settings = self.load_settings().await?;
         let mut ids = Vec::new();
         for change in changes {
             let direction = match change.action {
@@ -411,7 +456,9 @@ impl App {
                 voids3_sync::Action::Download => Direction::Download,
                 _ => continue,
             };
-            let path = voids3_platform::download_target(&local, &change.key)?;
+            let root = local.clone();
+            let key = change.key.clone();
+            let path = background(move || voids3_platform::download_target(&root, &key)).await?;
             if direction == Direction::Download
                 && let Some(parent) = path.parent()
             {
@@ -433,6 +480,14 @@ impl App {
     }
 }
 
+async fn background<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| Error::Storage(error.to_string()))?
+}
+
 fn folder_download_target(directory: &std::path::Path, prefix: &str, key: &str) -> Result<PathBuf> {
     let folder = prefix
         .trim_end_matches('/')
@@ -448,6 +503,69 @@ fn folder_download_target(directory: &std::path::Path, prefix: &str, key: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_waiting_for_storage_does_not_block_the_async_executor() {
+        // Hold SQLite's actual writer mutex while shutdown tries to persist
+        // cancellation. A timer on this single-thread executor must still fire.
+        struct HeldWrite {
+            started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl Serialize for HeldWrite {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                self.started
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(2));
+                serializer.serialize_str("isolated held writer")
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("queue.db")).unwrap());
+        let engine = Engine::new(store.clone(), TransferSettings::default()).unwrap();
+        let app = App {
+            store: store.clone(),
+            engine,
+            _instance_lock: std::fs::File::create(root.path().join("test.lock")).unwrap(),
+        };
+        let (_guard, _) = app.engine.begin_close().unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let writer = tokio::task::spawn_blocking(move || {
+            store.put_many(
+                "isolated-test",
+                &[(
+                    "held".into(),
+                    HeldWrite {
+                        started: std::sync::Mutex::new(Some(started)),
+                        release: std::sync::Mutex::new(held),
+                    },
+                )],
+            )
+        });
+        ready.await.unwrap();
+        let cleanup = app.cancel_and_drain();
+        tokio::pin!(cleanup);
+        tokio::select! { biased;
+            result = &mut cleanup => panic!("Cleanup blocked the executor until the held writer timed out: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
+        }
+        release.send(()).unwrap();
+        cleanup.await.unwrap();
+        writer.await.unwrap().unwrap();
+    }
 
     #[test]
     fn folder_downloads_preserve_hierarchy_and_reject_unsafe_provider_keys() {

@@ -443,6 +443,94 @@ async fn exercise(s3: &S3, prefix: &str) -> Result<(), Box<dyn std::error::Error
     );
     s3.folder(&format!("{prefix}empty/")).await?;
     exercise_upload_conflicts(s3, &format!("{prefix}conflicts/")).await?;
+    exercise_close(s3, &format!("{prefix}close/")).await?;
+    Ok(())
+}
+
+async fn exercise_close(s3: &S3, prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let store = Arc::new(Store::open(&root.path().join("close.db"))?);
+    let source = root.path().join("source.bin");
+    tokio::fs::write(&source, b"source stays intact").await?;
+    let mut upload = job(s3, source.clone(), format!("{prefix}multipart"), 19);
+    upload.upload_id = s3
+        .client
+        .create_multipart_upload()
+        .bucket(&s3.profile.bucket)
+        .key(&upload.key)
+        .send()
+        .await?
+        .upload_id()
+        .map(str::to_owned);
+    upload.status = Status::Paused;
+    store.put("transfers", &upload.id, &upload)?;
+    let destination = root.path().join("download.bin");
+    let mut download = job(s3, destination.clone(), format!("{prefix}download"), 100);
+    download.direction = Direction::Download;
+    download.status = Status::Paused;
+    let partial = root.path().join(format!(".voids3-{}.part", download.id));
+    tokio::fs::write(&partial, b"incomplete").await?;
+    tokio::fs::write(&destination, b"independently completed file").await?;
+    store.put("transfers", &download.id, &download)?;
+    let mut completed = job(s3, destination.clone(), format!("{prefix}complete"), 28);
+    completed.status = Status::Completed;
+    store.put("transfers", &completed.id, &completed)?;
+    let engine = Engine::new(store.clone(), settings())?;
+    let batch = engine.start_batch(
+        s3.clone(),
+        vec![source.clone()],
+        format!("{prefix}discovery/"),
+        settings(),
+    )?;
+    let (guard, summary) = engine.begin_close()?;
+    assert_eq!(summary.transfers, 2);
+    assert_eq!(summary.batches, 1);
+    assert!(engine.begin_preparation().is_err());
+    assert!(
+        engine
+            .start_batch(s3.clone(), vec![source.clone()], prefix.into(), settings())
+            .is_err()
+    );
+    assert!(engine.resume(s3.clone(), &upload.id).is_err());
+    assert_eq!(engine.transfer(&download.id)?.status, Status::Paused);
+    engine.interrupt_all(true)?;
+    engine.cancel_idle()?;
+    // Cancellation-only cleanup is allowed through the closed admission gate.
+    engine.cancel(s3.clone(), &upload.id)?;
+    idle(&engine).await;
+    assert!(engine.is_drained()?);
+    engine.check_closed()?;
+    assert_eq!(engine.transfer(&upload.id)?.status, Status::Cancelled);
+    assert!(engine.transfer(&upload.id)?.upload_id.is_none());
+    assert_eq!(engine.transfer(&download.id)?.status, Status::Cancelled);
+    assert_eq!(engine.transfer(&completed.id)?.status, Status::Completed);
+    assert!(!partial.exists());
+    assert_eq!(tokio::fs::read(&source).await?, b"source stays intact");
+    assert_eq!(
+        tokio::fs::read(&destination).await?,
+        b"independently completed file"
+    );
+    let feed = store
+        .list::<voids3_transfer::batch::BatchProgress>("upload_batches")?
+        .into_iter()
+        .find(|feed| feed.id == batch)
+        .unwrap();
+    assert_eq!(feed.state, FeedState::Cancelled);
+    assert_eq!(feed.discovered, 0);
+    let pending = s3
+        .client
+        .list_multipart_uploads()
+        .bucket(&s3.profile.bucket)
+        .prefix(prefix)
+        .send()
+        .await?;
+    assert!(pending.uploads().is_empty());
+    assert!(s3.scan(prefix).await?.is_empty());
+    let restarted = Engine::new(store, settings())?;
+    assert_eq!(restarted.transfer(&upload.id)?.status, Status::Cancelled);
+    assert_eq!(restarted.transfer(&download.id)?.status, Status::Cancelled);
+    drop(guard);
+    assert!(engine.begin_preparation().is_ok());
     Ok(())
 }
 
@@ -450,7 +538,8 @@ async fn idle(engine: &Engine) {
     tokio::time::timeout(Duration::from_secs(90), async {
         loop {
             let summary = engine.summary().unwrap();
-            if summary.active == 0
+            if engine.is_drained().unwrap()
+                && summary.active == 0
                 && summary
                     .batches
                     .iter()

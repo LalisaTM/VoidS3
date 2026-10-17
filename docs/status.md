@@ -1,8 +1,10 @@
-# Feature status at 0.3.0
+# Feature status at 0.3.1
 
 Implemented means code exists; verification evidence is recorded separately in [validation.md](validation.md). This is not the complete product described in the original brief.
 
 Version 0.3.0 adds bounded background upload discovery, per-file conflict waiting, lightweight queue pages and five transfer presets. See [transfers.md](transfers.md) for limits and [roadmap.md](roadmap.md) for proposed improvements.
+
+Version 0.3.1 adds native close confirmation and cancellation with background cleanup. The native event loop only intercepts close/exit and schedules work; transfer I/O, storage, traversal and bulk processing run outside the UI thread. Rendering and native window/dialog operations necessarily use their UI threads. No universal frame-rate guarantee or installed-app profiling result is claimed.
 
 | Area         | Implemented                                                                                                                                                                                                                                                                                                | Unfinished / limits                                                                                                                                            |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |

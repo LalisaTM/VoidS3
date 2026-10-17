@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 — 2026-10-17
+
+- Intercept native window close and application exit. Show pending transfers and upload batches, default to Keep open, and require an explicit choice to cancel and close.
+- Block new transfer admissions during the close check; cancel preparation, discovery, queued/paused/conflicting jobs and active workers after confirmation. Wait for worker cleanup and durable outcomes before exiting.
+- Attempt multipart aborts and owned partial-download removal while preserving completed files. Show cleanup failures or a 30-second timeout and offer Keep open or an explicit Close anyway; retain unfinished records for retry.
+- Keep close callbacks limited to event suppression and task scheduling. Move bulk queue operations, settings, download-path validation, automatic conflict decisions and sync comparison onto background workers. Add a blocked-storage executor responsiveness regression test and real HTTP shutdown cleanup coverage.
+- Sort/filter directory listings over 500 entries in a Web Worker, reuse its dataset across filter changes and reject stale results. Cache listing totals and use a selected-path set during rendering.
+
 ## 0.3.0 — 2026-10-16
 
 - Start uploads through bounded background discovery instead of checking every destination first. New small files use conditional uploads directly; conflicts wait per file while other uploads continue.
