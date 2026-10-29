@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 voids3-core.workspace = true
-dirs = "6"
+dirs = "7"
 trash = "5"
 walkdir = "2"
 
